@@ -213,43 +213,6 @@ Calibration is most useful after hardware changes, tube changes, scale changes, 
 6. Verify every charge.
 7. Watch for repeatable under/over behavior; re-characterize if the setup no longer matches the saved model.
 
-## Build From Source
-
-Install Git, CMake, Ninja, the ARM GCC toolchain, Python 3, and the Raspberry Pi Pico SDK. The included PowerShell helper expects the Pico SDK environment used by the Raspberry Pi Pico extension.
-
-```powershell
-git clone <repository-url-from-the-github-code-button>
-cd Opentrickler_ML
-git submodule update --init --recursive
-.\configure_env.ps1
-cmake -B build-pico2w-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DPICO_BOARD=pico2_w
-cmake --build build-pico2w-release --config Release
-```
-
-Useful outputs:
-
-- `build-pico2w-release/app.uf2`: USB BOOTSEL flashing
-- `build-pico2w-release/app.bin`: OTA upload
-- `build-pico2w-release/app.elf`: debug symbols
-- `build-pico2w-release/app.hex`: alternate flashing format
-
-## Flashing And OTA
-
-USB first install or rollback:
-
-1. Disconnect motor power.
-2. Hold BOOTSEL while plugging in USB.
-3. Copy `app.uf2` to the `RPI-RP2` drive.
-4. Reboot and verify the firmware version.
-
-OTA after the device is already running OTA-capable firmware:
-
-```powershell
-python tools/ota_upload.py --host <device-ip-or-hostname> --bin build-pico2w-release/app.bin --apply
-```
-
-Use USB rollback if OTA fails, Wi-Fi is unstable, or the version cannot be verified after reboot.
-
 ## Repository Map
 
 - `.github/workflows/cmake.yml`: GitHub Actions firmware build for Pico 2 W / RP2350.
