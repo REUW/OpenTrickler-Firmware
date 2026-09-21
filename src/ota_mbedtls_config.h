@@ -35,6 +35,12 @@
 #define MBEDTLS_SSL_TLS_C
 #define MBEDTLS_SSL_CLI_C
 #define MBEDTLS_SSL_PROTO_TLS1_2
+// Without this, mbedTLS keeps only a digest of the peer's certificate after
+// verification, not the certificate itself, so mbedtls_ssl_get_peer_cert()
+// returns NULL. ota_tls.c uses it to report exactly which certificate chain
+// the server presented when verification fails -- essential for diagnosing
+// a real device against a real server, where we can't just log in and look.
+#define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE
 
 // Keep the handshake's incoming buffer generous -- GitHub/its CDN may send
 // a multi-certificate chain in one handshake flight and we can't rely on
@@ -60,6 +66,22 @@
 
 #define MBEDTLS_MD_C
 #define MBEDTLS_SHA256_C
+// SHA-384 is a genuinely separate config option from SHA-512 in this
+// mbedTLS version (both live in sha512.c, but md.c only wires up SHA-384
+// support when MBEDTLS_SHA384_C is defined) -- without it, mbedTLS's OID
+// lookup can't map the sha384WithRSAEncryption / ecdsa-with-SHA384 OIDs to
+// a hash algorithm at all, and mbedtls_x509_crt_parse() fails any
+// certificate signed that way with MBEDTLS_ERR_X509_UNKNOWN_SIG_ALG ("OID
+// is not found") -- not a verification failure, a parse failure, so the
+// certificate never even makes it into the trust store. This was confirmed
+// by parsing this file's whole CA bundle certificate-by-certificate with a
+// host build of this exact vendored mbedTLS + this exact config: 13 of the
+// 17 embedded certs -- effectively every non-2016-era one, since SHA-384
+// is the modern default for higher-strength CA signatures -- failed with
+// exactly that error until this define was added, matching this project's
+// own on-device diagnostic (ca_bundle_summary in /rest/update_status)
+// showing only 4 of 17 roots ever actually loaded.
+#define MBEDTLS_SHA384_C
 #define MBEDTLS_SHA512_C
 #define MBEDTLS_SHA1_C
 

@@ -183,16 +183,22 @@ https://github.com/<owner>/<repo>/releases/latest/download/app.bin
      "crc32": "0x1A2B3C4D"
    }
    ```
-2. Attach both files to the GitHub Release you're publishing (drag them onto
-   the release's asset list in the GitHub UI, or `gh release upload
-   <tag> publish_out/manifest.json publish_out/app.bin`).
+2. Also copy `build-pico2w-release/app.uf2` alongside them. `manifest.json`
+   and `app.bin` are only what an *already-running* device's "Check for
+   Updates" asks for by name — a brand new board has no auto-updater to
+   invoke yet, so it needs a ready-to-flash `.uf2` on the release too (drag
+   it onto the `RPI-RP2` BOOTSEL drive the same way as step 3 at the top of
+   this doc). Attach all three files to the GitHub Release you're publishing
+   (drag them onto the release's asset list in the GitHub UI, or
+   `gh release upload <tag> publish_out/manifest.json publish_out/app.bin
+   publish_out/*.uf2`).
 
    If you cut releases on GitHub (this fork lives at
    [thomaspember1990/OpenTrickler-Firmware](https://github.com/thomaspember1990/OpenTrickler-Firmware))
    and want this automated,
    `.github/workflows/publish-update-manifest.yml` is already wired up: it
    fires on every published GitHub release, builds the firmware the same way
-   `cmake.yml` does, runs `publish_update_manifest.py`, and uploads both
+   `cmake.yml` does, runs `publish_update_manifest.py`, and uploads all three
    files straight to that same release using GitHub's own automatically
    provided token. **No repository secrets to create or manage at all** —
    publishing a GitHub release is the entire workflow.

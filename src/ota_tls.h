@@ -26,6 +26,15 @@ extern "C" {
 // ota_tls_connect() on first use; safe to call more than once.
 bool ota_tls_global_init(char *err, size_t err_len);
 
+// Diagnostic only: a short summary of what actually ended up in the parsed
+// trust store after ota_tls_global_init() ran -- "N loaded (F failed): "
+// followed by each loaded cert's subject CN, comma-separated. Lets us
+// confirm on a real device (no UART) whether every embedded cert actually
+// parsed and made it into the in-memory chain mbedTLS verifies against,
+// rather than assuming the source file's contents are what's running.
+// Empty string until ota_tls_global_init() has run at least once.
+const char *ota_tls_ca_chain_summary(void);
+
 // Resolves host (dotted IP or DNS name), opens a TCP connection, and
 // performs a full TLS 1.2 handshake with certificate verification against
 // the embedded CA bundle and SNI/hostname checking against `host`. Returns

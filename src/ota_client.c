@@ -23,6 +23,7 @@
 #include "eeprom.h"
 #include "ota_update.h"
 #include "ota_tls.h"
+#include "ota_debug.h"
 #include "version.h"
 
 // ---------------------------------------------------------------------------
@@ -73,15 +74,19 @@ typedef struct {
     uint32_t bin_size;
     uint32_t bin_crc32;
     bool manifest_valid;
-    char check_error[128];
+    char check_error[512];
 
     update_apply_state_t apply_state;
     uint32_t apply_received;
     uint32_t apply_total;
-    char apply_error[128];
+    char apply_error[512];
 } ota_client_status_t;
 
 static ota_client_status_t g_status = {0};
+// Crash-diagnosis only: the update-check checkpoint left in EEPROM by the
+// boot before this one. See src/ota_debug.h. Temporary -- remove once the
+// TLS client is confirmed stable.
+static uint8_t g_last_boot_checkpoint = 0;
 
 typedef enum {
     OTA_CLIENT_CMD_CHECK = 0,
@@ -90,10 +95,33 @@ typedef enum {
 
 static QueueHandle_t g_ota_client_queue = NULL;
 
-#define OTA_CLIENT_HEADER_BUF_LEN       768
+// GitHub's real responses (particularly the 3xx redirect off
+// releases/latest/download/... to the actual asset host) carry a lot of
+// header weight: a Content-Security-Policy header alone commonly runs
+// 1.5-2.5KB on github.com, and it's typically joined by several Set-Cookie
+// headers (session/CSRF cookies, each ~100-300 bytes), Strict-Transport-Security,
+// half a dozen X-GitHub-* tracing/security headers, ETag, Vary, and the
+// Location/Content-Length/Content-Type this code actually needs. 768 bytes
+// (and then 4096, which *still* wasn't enough against the real thing) was
+// sized for a hand-built manifest server, not GitHub's actual edge
+// responses. Lives on the OTA task's stack (8192-word ~= 32KB stack, see
+// ota_client_task()'s xTaskCreate() call) alongside a handful of much
+// smaller buffers, so there's ample headroom for this.
+#define OTA_CLIENT_HEADER_BUF_LEN       8192
 #define OTA_CLIENT_MANIFEST_BUF_LEN     2048
-#define OTA_CLIENT_REQUEST_BUF_LEN      320
-#define OTA_CLIENT_URL_BUF_LEN          384
+// GitHub's releases/latest/download/<asset> redirects off github.com to a
+// signed URL on a separate asset host (objects.githubusercontent.com or
+// similar), and that URL's query string alone -- AWS-style X-Amz-Credential/
+// X-Amz-Signature/X-Amz-SignedHeaders params, a response-content-disposition,
+// GitHub's own long-lived token param -- routinely runs past a thousand
+// characters. 384 bytes (sized for the short, hand-written
+// /releases/latest/download/manifest.json request path) silently truncated
+// that redirect URL, which then failed one hop later as an oversized
+// request line ("request path too long") once the truncated-but-still-huge
+// path was built into the next GET. Both buffers below hold that same
+// signed URL end to end, so both need the same headroom.
+#define OTA_CLIENT_URL_BUF_LEN          2048
+#define OTA_CLIENT_REQUEST_BUF_LEN      (OTA_CLIENT_URL_BUF_LEN + 256)
 
 // ---------------------------------------------------------------------------
 // Minimal HTTPS/1.1 GET client, following redirects. Body bytes are handed
@@ -187,20 +215,29 @@ static bool ota_client_https_get(const char *host, const char *path,
             return false;
         }
 
+        ota_debug_checkpoint(OTA_DEBUG_CP_SEND_REQUEST);
         if (ota_tls_write(conn, (const uint8_t *)request, (size_t)req_len) < 0) {
             snprintf(err, err_len, "could not send request to %s", cur_host);
             ota_tls_close(conn);
             return false;
         }
+        ota_debug_checkpoint(OTA_DEBUG_CP_REQUEST_SENT);
 
         char header_buf[OTA_CLIENT_HEADER_BUF_LEN];
         size_t header_len = 0;
         bool header_complete = false;
         size_t body_start_in_buf = 0;
 
+        ota_debug_checkpoint(OTA_DEBUG_CP_READ_HEADERS);
         while (!header_complete) {
             if (header_len >= sizeof(header_buf) - 1) {
-                snprintf(err, err_len, "response headers too large");
+                // Report the actual size hit, not just the fact of overflow --
+                // this buffer has already had to grow twice (768 -> 4096 ->
+                // 8192) chasing GitHub's real header size against the real
+                // server, and a bare "too large" gave no way to size the next
+                // attempt correctly without another round-trip of guessing.
+                snprintf(err, err_len, "response headers too large (over %u bytes from %s)",
+                         (unsigned)sizeof(header_buf), cur_host);
                 ota_tls_close(conn);
                 return false;
             }
@@ -225,6 +262,7 @@ static bool ota_client_https_get(const char *host, const char *path,
             }
         }
 
+        ota_debug_checkpoint(OTA_DEBUG_CP_HEADERS_OK);
         if (strncmp(header_buf, "HTTP/1.", 7) != 0) {
             snprintf(err, err_len, "not an HTTP response from %s", cur_host);
             ota_tls_close(conn);
@@ -249,6 +287,17 @@ static bool ota_client_https_get(const char *host, const char *path,
             size_t li = 0;
             while (*loc != '\r' && *loc != '\n' && *loc != '\0' && li + 1 < sizeof(loc_buf)) {
                 loc_buf[li++] = *loc++;
+            }
+            // If the Location header still has more URL past what fit, this
+            // used to truncate silently and hand the next hop a corrupted
+            // path -- which surfaced several steps later as a confusing
+            // "request path too long" with no indication the real problem
+            // was here. Fail loudly and immediately instead.
+            if (*loc != '\r' && *loc != '\n' && *loc != '\0') {
+                snprintf(err, err_len, "redirect Location from %s is longer than %u bytes",
+                         cur_host, (unsigned)sizeof(loc_buf));
+                ota_tls_close(conn);
+                return false;
             }
             loc_buf[li] = '\0';
 
@@ -297,6 +346,7 @@ static bool ota_client_https_get(const char *host, const char *path,
             received += (uint32_t)leftover_len;
         }
 
+        ota_debug_checkpoint(OTA_DEBUG_CP_READ_BODY);
         uint8_t recv_buf[1024];
         while (received < (uint32_t)content_length) {
             size_t want = (uint32_t)content_length - received;
@@ -322,6 +372,7 @@ static bool ota_client_https_get(const char *host, const char *path,
             received += (uint32_t)n;
         }
 
+        ota_debug_checkpoint(OTA_DEBUG_CP_BODY_OK);
         ota_tls_close(conn);
         return true;
     }
@@ -412,6 +463,7 @@ static void ota_client_build_asset_path(char *out, size_t out_len, const char *a
 }
 
 static void ota_client_do_check(void) {
+    ota_debug_checkpoint(OTA_DEBUG_CP_CHECK_STARTED);
     g_status.check_state = UPDATE_CHECK_IN_PROGRESS;
 
     if (g_update_config.owner[0] == '\0' || g_update_config.repo[0] == '\0') {
@@ -432,7 +484,7 @@ static void ota_client_do_check(void) {
     char path[OTA_CLIENT_URL_BUF_LEN];
     ota_client_build_asset_path(path, sizeof(path), OTA_CLIENT_MANIFEST_ASSET);
 
-    char err[128] = {0};
+    char err[512] = {0};
     bool ok = ota_client_https_get(OTA_CLIENT_GITHUB_HOST, path,
                                     ota_client_manifest_body_cb, &state,
                                     NULL, err, sizeof(err));
@@ -443,6 +495,7 @@ static void ota_client_do_check(void) {
         return;
     }
 
+    ota_debug_checkpoint(OTA_DEBUG_CP_MANIFEST_PARSED);
     bool have_version = json_extract_string(manifest_buf, "version", g_status.latest_version, sizeof(g_status.latest_version));
     bool have_size = json_extract_u32(manifest_buf, "size", &g_status.bin_size);
     bool have_crc = json_extract_u32(manifest_buf, "crc32", &g_status.bin_crc32);
@@ -459,15 +512,76 @@ static void ota_client_do_check(void) {
     g_status.manifest_valid = true;
     g_status.check_state = UPDATE_CHECK_OK;
     g_status.check_error[0] = '\0';
+    ota_debug_checkpoint(OTA_DEBUG_CP_CHECK_COMPLETE);
+}
+
+// ota_stage_write() (ota_update.c) enforces the rules the old browser-driven
+// hex-upload endpoint always satisfied by construction: each call must be
+// <= ota_stage_chunk_size() bytes, its offset must land on a flash page
+// boundary, and a non-final call's length must itself be a whole number of
+// flash pages. That endpoint hex-decoded one browser-sized POST at a time,
+// so those were automatic. A TLS download has no such shape: a single
+// mbedtls_ssl_read() can hand back anywhere up to ~16KB in one call (see
+// MBEDTLS_SSL_IN_CONTENT_LEN), and the first body_cb call in particular can
+// carry whatever body bytes happened to already be sitting in the header
+// read buffer past the "\r\n\r\n" terminator -- both routinely bigger than
+// ota_stage_chunk_size() and never page-aligned. Passing those lengths
+// straight through failed immediately against a real download ("bad chunk
+// request" / "non-final chunks must end on a flash page boundary"). This
+// buffers arbitrary-sized reads into fixed, aligned pages before handing
+// them to ota_stage_write(), which is the shape it actually requires.
+static uint8_t g_apply_chunk_buf[1024];
+static size_t g_apply_chunk_fill = 0;
+static uint32_t g_apply_chunk_next_offset = 0;
+
+static bool ota_client_apply_flush_chunk(void) {
+    if (g_apply_chunk_fill == 0) {
+        return true;
+    }
+    if (!ota_stage_write(g_apply_chunk_next_offset, g_apply_chunk_buf, g_apply_chunk_fill)) {
+        snprintf(g_status.apply_error, sizeof(g_status.apply_error), "%s", ota_stage_last_error());
+        return false;
+    }
+    g_apply_chunk_next_offset += (uint32_t)g_apply_chunk_fill;
+    g_status.apply_received = g_apply_chunk_next_offset;
+    g_apply_chunk_fill = 0;
+    return true;
 }
 
 static bool ota_client_apply_body_cb(void *ctx, const uint8_t *data, size_t len) {
     (void)ctx;
-    if (!ota_stage_write(g_status.apply_received, data, len)) {
-        snprintf(g_status.apply_error, sizeof(g_status.apply_error), "%s", ota_stage_last_error());
+
+    uint32_t chunk_size = ota_stage_chunk_size();
+    if (chunk_size == 0 || chunk_size > sizeof(g_apply_chunk_buf)) {
+        snprintf(g_status.apply_error, sizeof(g_status.apply_error),
+                 "internal error: OTA chunk size %u exceeds %u-byte buffer",
+                 (unsigned)chunk_size, (unsigned)sizeof(g_apply_chunk_buf));
         return false;
     }
-    g_status.apply_received += (uint32_t)len;
+
+    while (len > 0) {
+        size_t space = (size_t)chunk_size - g_apply_chunk_fill;
+        size_t take = len < space ? len : space;
+        memcpy(g_apply_chunk_buf + g_apply_chunk_fill, data, take);
+        g_apply_chunk_fill += take;
+        data += take;
+        len -= take;
+
+        uint32_t total_written_after_this = g_apply_chunk_next_offset + (uint32_t)g_apply_chunk_fill;
+        bool chunk_is_full = g_apply_chunk_fill == (size_t)chunk_size;
+        // The very last chunk of the whole download is allowed to be
+        // shorter than chunk_size and not page-aligned in length (that's
+        // what ota_stage_write()'s offset+len==expected_size exception is
+        // for) -- recognise it by comparing against the total size the
+        // manifest already told us to expect, known up front, rather than
+        // trying to infer "last network read" from this call alone.
+        bool is_final_chunk = total_written_after_this == g_status.apply_total;
+        if (chunk_is_full || is_final_chunk) {
+            if (!ota_client_apply_flush_chunk()) {
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -495,12 +609,14 @@ static void ota_client_do_apply(void) {
         snprintf(g_status.apply_error, sizeof(g_status.apply_error), "%s", ota_stage_last_error());
         return;
     }
+    g_apply_chunk_fill = 0;
+    g_apply_chunk_next_offset = 0;
 
     char path[OTA_CLIENT_URL_BUF_LEN];
     ota_client_build_asset_path(path, sizeof(path), OTA_CLIENT_BIN_ASSET);
 
     uint32_t content_length = 0;
-    char err[128] = {0};
+    char err[512] = {0};
     bool ok = ota_client_https_get(OTA_CLIENT_GITHUB_HOST, path,
                                     ota_client_apply_body_cb, NULL,
                                     &content_length, err, sizeof(err));
@@ -582,6 +698,11 @@ bool ota_client_init(void) {
     }
 
     memset(&g_status, 0, sizeof(g_status));
+    // Read whatever crash-diagnosis checkpoint was left in EEPROM by the
+    // *previous* boot before we (or anything else) can overwrite it. If the
+    // last update check locked up the board, this tells us how far it got.
+    // See src/ota_debug.h -- temporary, remove once the TLS client is stable.
+    g_last_boot_checkpoint = ota_debug_last_boot_checkpoint();
 
     g_ota_client_queue = xQueueCreate(2, sizeof(ota_client_cmd_t));
     // mbedTLS handshakes use fairly deep call stacks (bignum/RSA/ECC math),
@@ -730,10 +851,17 @@ bool http_rest_update_status(struct fs_file *file, int num_params, char *params[
     (void)num_params;
     (void)params;
     (void)values;
-    static char json_buffer[900];
+    static char json_buffer[1800];
 
     bool update_available = g_status.manifest_valid &&
                              strcmp(g_status.latest_version, version_string) != 0;
+
+    // Kick global_init here (idempotent, safe pre-connect) purely so
+    // ota_tls_ca_chain_summary() has something to report even before the
+    // first "Check for Updates" click -- lets the trust-store contents be
+    // inspected without waiting on/triggering a real network attempt.
+    char tls_init_err[64] = {0};
+    ota_tls_global_init(tls_init_err, sizeof(tls_init_err));
 
     snprintf(json_buffer, sizeof(json_buffer),
              "%s"
@@ -748,7 +876,10 @@ bool http_rest_update_status(struct fs_file *file, int num_params, char *params[
              "\"apply_state\":\"%s\","
              "\"apply_error\":\"%s\","
              "\"apply_received\":%" PRIu32 ","
-             "\"apply_total\":%" PRIu32 "}",
+             "\"apply_total\":%" PRIu32 ","
+             "\"last_boot_checkpoint\":%u,"
+             "\"last_boot_checkpoint_label\":\"%s\","
+             "\"ca_bundle_summary\":\"%s\"}",
              http_json_header,
              version_string,
              update_check_state_string(g_status.check_state),
@@ -761,7 +892,10 @@ bool http_rest_update_status(struct fs_file *file, int num_params, char *params[
              update_apply_state_string(g_status.apply_state),
              g_status.apply_error,
              g_status.apply_received,
-             g_status.apply_total);
+             g_status.apply_total,
+             (unsigned)g_last_boot_checkpoint,
+             ota_debug_checkpoint_label(g_last_boot_checkpoint),
+             ota_tls_ca_chain_summary());
 
     file->data = json_buffer;
     file->len = strlen(json_buffer);

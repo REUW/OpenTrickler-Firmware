@@ -29,6 +29,10 @@
 #include "wizard.html.h"
 #include "styles.css.h"
 #include "favicon.ico.h"
+#include "apple_touch_icon.png.h"
+#include "icon_192.png.h"
+#include "icon_512.png.h"
+#include "manifest.json.h"
 
 
 bool http_404_error(struct fs_file *file, int num_params, char *params[], char *values[]) {
@@ -112,6 +116,49 @@ bool http_favicon(struct fs_file *file, int num_params, char *params[], char *va
     return true;
 }
 
+// iOS Safari's "Add to Home Screen" ignores /favicon.ico entirely -- it only
+// ever looks for a real PNG at an apple-touch-icon link (never a data: URI
+// reliably, and never an .ico), which is why the home screen icon showed up
+// blank before this existed. icon_192/icon_512 back a manifest.json so
+// Android/Chrome's "Add to Home Screen" gets a proper icon too. All four use
+// the TP Custom Rifle Parts mark (see ot_logo_icon.h for the boot-screen
+// version this is derived from).
+bool http_apple_touch_icon(struct fs_file *file, int num_params, char *params[], char *values[]) {
+    file->data = (const char *)apple_touch_icon_png;
+    file->len = apple_touch_icon_png_len;
+    file->index = apple_touch_icon_png_len;
+    file->flags = FS_FILE_FLAGS_HEADER_INCLUDED | FS_FILE_FLAGS_HEADER_PERSISTENT;
+
+    return true;
+}
+
+bool http_icon_192(struct fs_file *file, int num_params, char *params[], char *values[]) {
+    file->data = (const char *)icon_192_png;
+    file->len = icon_192_png_len;
+    file->index = icon_192_png_len;
+    file->flags = FS_FILE_FLAGS_HEADER_INCLUDED | FS_FILE_FLAGS_HEADER_PERSISTENT;
+
+    return true;
+}
+
+bool http_icon_512(struct fs_file *file, int num_params, char *params[], char *values[]) {
+    file->data = (const char *)icon_512_png;
+    file->len = icon_512_png_len;
+    file->index = icon_512_png_len;
+    file->flags = FS_FILE_FLAGS_HEADER_INCLUDED | FS_FILE_FLAGS_HEADER_PERSISTENT;
+
+    return true;
+}
+
+bool http_manifest_json(struct fs_file *file, int num_params, char *params[], char *values[]) {
+    file->data = (const char *)manifest_json;
+    file->len = manifest_json_len;
+    file->index = manifest_json_len;
+    file->flags = FS_FILE_FLAGS_HEADER_INCLUDED | FS_FILE_FLAGS_HEADER_PERSISTENT;
+
+    return true;
+}
+
 
 bool rest_endpoints_init(bool default_wizard) {
     if (default_wizard) {
@@ -147,6 +194,14 @@ bool rest_endpoints_init(bool default_wizard) {
     rest_register_handler("/basic", http_web_portal_basic);
     rest_register_handler("/styles.css", http_styles_css);
     rest_register_handler("/favicon.ico", http_favicon);
+    rest_register_handler("/apple-touch-icon.png", http_apple_touch_icon);
+    // iOS also probes this exact filename first, before falling back to the
+    // plain apple-touch-icon.png link in <head> -- serve the same icon for
+    // both so neither path shows a blank/default icon.
+    rest_register_handler("/apple-touch-icon-precomposed.png", http_apple_touch_icon);
+    rest_register_handler("/icon-192.png", http_icon_192);
+    rest_register_handler("/icon-512.png", http_icon_512);
+    rest_register_handler("/manifest.json", http_manifest_json);
 
     // Error reporting endpoints
     rest_register_handler("/rest/errors", http_rest_errors);

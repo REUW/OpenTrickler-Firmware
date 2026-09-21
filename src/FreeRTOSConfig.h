@@ -72,7 +72,17 @@
 /* Memory allocation related definitions. */
 #define configSUPPORT_STATIC_ALLOCATION         0
 #define configSUPPORT_DYNAMIC_ALLOCATION        1
-#define configTOTAL_HEAP_SIZE                   (128*1024)
+// Bumped from 128K: the OTA update-check task (src/ota_client.c/ota_tls.c)
+// added a real TLS 1.2 client on top of everything else running -- its own
+// 32K task stack, ~18K of mbedTLS SSL session buffers, the embedded 14-CA
+// trust bundle, GitHub's own certificate chain received during the
+// handshake, and RSA/ECC scratch space during verification all draw from
+// this same heap. 128K was tight enough with that added load to risk
+// tripping vApplicationMallocFailedHook() (configUSE_MALLOC_FAILED_HOOK
+// below) mid-handshake, which halts the whole device -- including the web
+// server -- rather than failing just the update check. There's ample RAM
+// headroom on RP2350 (512K total) to remove that risk with a wide margin.
+#define configTOTAL_HEAP_SIZE                   (224*1024)
 #define configAPPLICATION_ALLOCATED_HEAP        0
 
 /* Hook function related definitions. */

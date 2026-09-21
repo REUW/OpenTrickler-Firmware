@@ -9,7 +9,20 @@
     <script src="https://cdn.tailwindcss.com"></script>
 
     <meta name="viewport" content="width=device-width, initial-scale=1.0 viewport-fit=cover">
-    <link rel="icon" href="https://raw.githubusercontent.com/eamars/OpenTrickler/main/Resources/favicon.ico">
+    <!-- Served locally by this firmware (rest_endpoints.c), not fetched from
+         GitHub -- this device is often used with no internet route, and
+         iOS's "Add to Home Screen" specifically requires a same-origin PNG
+         at an apple-touch-icon link; it never picks up a plain favicon.ico,
+         a remote URL, or a data: URI reliably. manifest.json backs Android/
+         Chrome's "Add to Home Screen" with the same TP Custom Rifle Parts
+         mark. -->
+    <link rel="icon" href="/favicon.ico">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="manifest" href="/manifest.json">
+    <meta name="apple-mobile-web-app-title" content="TP Custom">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#b47d2e">
 
     <style>
         :root,
@@ -1716,52 +1729,12 @@ html[data-ot-theme="dark"], html[data-ot-theme="dark"] {
                     <!-- Firmware Update Page -->
                     <section class="settings-page" id="settings-firmware-update" name="Firmware Update" style="display: none;">
                         <div class="grid grid-cols-1 gap-4">
-                            <div class="alert alert-info">
-                                <span>OTA currently stages and verifies firmware over WiFi. Applying the staged image requires one future OTA bootloader transition build.</span>
-                            </div>
-
-                            <div class="stats stats-vertical shadow">
-                                <div class="stat">
-                                    <div class="stat-title">OTA Support</div>
-                                    <div id="otaSupportStat" class="stat-value text-lg">Unknown</div>
-                                    <div id="otaSupportDesc" class="stat-desc">Refresh status to inspect flash layout.</div>
-                                </div>
-                                <div class="stat">
-                                    <div class="stat-title">Staged Firmware</div>
-                                    <div id="otaStagedStat" class="stat-value text-lg">Unknown</div>
-                                    <div id="otaStagedDesc" class="stat-desc">No data loaded yet.</div>
-                                </div>
-                            </div>
-
-                            <div class="card bg-base-200">
-                                <div class="card-body">
-                                    <h3 class="card-title">Upload From This PC</h3>
-                                    <p class="text-sm">After building, upload the binary from PowerShell:</p>
-                                    <pre class="text-xs whitespace-pre-wrap bg-base-300 rounded-box p-3">python tools/ota_upload.py --host &lt;device-ip-or-hostname&gt; --bin build-pico2w-release/app.bin --apply</pre>
-                                    <p class="text-sm">Use the UF2 only for USB flashing. OTA staging uses the companion app.bin because it is the raw flash image.</p>
-                                </div>
-                            </div>
-
-                            <div class="flex gap-2">
-                                <button class="btn btn-neutral" onclick="otaRefreshStatus()">Refresh OTA Status</button>
-                                <button class="btn btn-warning" onclick="otaApplyStaged()">Apply Staged Firmware</button>
-                            </div>
-
-                            <pre id="otaStatusText" class="text-xs whitespace-pre-wrap bg-base-200 rounded-box p-3">OTA status not loaded.</pre>
-
-                            <div class="divider"></div>
-
                             <div class="card bg-base-200">
                                 <div class="card-body">
                                     <h3 class="card-title">Check for Updates</h3>
                                     <p class="text-sm">
-                                        The device checks GitHub directly over a verified HTTPS connection
-                                        for the latest release of this GitHub repository, then downloads and
-                                        stages the firmware itself over WiFi -- no laptop, no server, and
-                                        nothing to run on your end. To publish an update, just attach
-                                        <code>manifest.json</code> and <code>app.bin</code> to a GitHub
-                                        Release (the included GitHub Actions workflow can do this for you
-                                        automatically). See QUICKSTART.md for the manifest format.
+                                        Checks for a newer firmware release and, if one is available, downloads
+                                        and installs it over WiFi. No PC or cable needed.
                                     </p>
 
                                     <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1802,9 +1775,52 @@ html[data-ot-theme="dark"], html[data-ot-theme="dark"] {
                                     </div>
 
                                     <progress id="updateApplyProgress" class="progress progress-warning w-full" value="0" max="100" style="display: none;"></progress>
+
+                                    <div id="updateCheckpointBox" class="alert alert-warning" style="display: none;">
+                                        <span id="updateCheckpointText"></span>
+                                    </div>
+
                                     <pre id="updateStatusText" class="text-xs whitespace-pre-wrap bg-base-300 rounded-box p-3">Update status not loaded.</pre>
                                 </div>
                             </div>
+
+                            <details class="collapse collapse-arrow bg-base-200">
+                                <summary class="collapse-title text-sm font-medium">Advanced: manual OTA (for troubleshooting)</summary>
+                                <div class="collapse-content">
+                                    <div class="alert alert-info">
+                                        <span>OTA currently stages and verifies firmware over WiFi. Applying the staged image requires one future OTA bootloader transition build.</span>
+                                    </div>
+
+                                    <div class="stats stats-vertical shadow">
+                                        <div class="stat">
+                                            <div class="stat-title">OTA Support</div>
+                                            <div id="otaSupportStat" class="stat-value text-lg">Unknown</div>
+                                            <div id="otaSupportDesc" class="stat-desc">Refresh status to inspect flash layout.</div>
+                                        </div>
+                                        <div class="stat">
+                                            <div class="stat-title">Staged Firmware</div>
+                                            <div id="otaStagedStat" class="stat-value text-lg">Unknown</div>
+                                            <div id="otaStagedDesc" class="stat-desc">No data loaded yet.</div>
+                                        </div>
+                                    </div>
+
+                                    <div class="card bg-base-100">
+                                        <div class="card-body">
+                                            <h3 class="card-title">Upload From This PC</h3>
+                                            <p class="text-sm">After building, upload the binary from PowerShell:</p>
+                                            <pre class="text-xs whitespace-pre-wrap bg-base-300 rounded-box p-3">python tools/ota_upload.py --host &lt;device-ip-or-hostname&gt; --bin build-pico2w-release/app.bin --apply</pre>
+                                            <p class="text-sm">Use the UF2 only for USB flashing. OTA staging uses the companion app.bin because it is the raw flash image.</p>
+                                        </div>
+                                    </div>
+
+                                    <div class="flex gap-2">
+                                        <button class="btn btn-neutral" onclick="otaRefreshStatus()">Refresh OTA Status</button>
+                                        <button class="btn btn-warning" onclick="otaApplyStaged()">Apply Staged Firmware</button>
+                                    </div>
+
+                                    <pre id="otaStatusText" class="text-xs whitespace-pre-wrap bg-base-200 rounded-box p-3">OTA status not loaded.</pre>
+                                </div>
+                            </details>
                         </div>
                     </section>
 
@@ -3972,6 +3988,24 @@ const ChargeModeState = Object.freeze({
             const data = await response.json();
 
             document.getElementById("updateCurrentVersionStat").innerText = data.current_version || "Unknown";
+
+            const checkpointBox = document.getElementById("updateCheckpointBox");
+            const checkpointText = document.getElementById("updateCheckpointText");
+            if (checkpointBox && checkpointText) {
+                // 0 = none, 18 = check completed normally -- anything else means
+                // the board didn't get through a check cleanly on the boot
+                // before this one (e.g. it locked up and had to be power-cycled).
+                if (data.last_boot_checkpoint > 0 && data.last_boot_checkpoint !== 18) {
+                    checkpointBox.style.display = "flex";
+                    checkpointText.innerText =
+                        "Diagnostic: the last update check before this boot did not finish. " +
+                        "It got as far as: \"" + data.last_boot_checkpoint_label + "\" (code " +
+                        data.last_boot_checkpoint + ") before something stopped it.";
+                }
+                else {
+                    checkpointBox.style.display = "none";
+                }
+            }
 
             if (data.check_state === "checking") {
                 latestStat.innerText = "Checking...";

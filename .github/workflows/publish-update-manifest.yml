@@ -71,19 +71,33 @@ jobs:
             --notes "${{ github.event.release.body }}" \
             --out-dir "publish_out"
 
-      - name: Attach manifest.json + app.bin to the release
+      - name: Attach manifest.json + app.bin + app.uf2 to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.event.release.tag_name || github.ref_name }}"
+          # manifest.json + app.bin are what the in-GUI "Check for Updates"
+          # feature asks for by exact name -- a device already running any
+          # OpenTrickler build with the auto-updater needs only those two.
+          # app.uf2 is for everyone else: the very first flash of a fresh
+          # Pico 2 W (BOOTSEL drag-and-drop) has no auto-updater to invoke
+          # yet, so that device needs a ready-to-flash .uf2 as a release
+          # asset too, not just the raw .bin the updater consumes. Renamed
+          # with the version in the filename so multiple releases' assets
+          # stay distinguishable on the repo's Releases page.
+          #
           # --clobber lets re-running this workflow (or workflow_dispatch)
           # replace previously-uploaded assets on the same release.
+          cp "build-pico2_w/app.uf2" "publish_out/OpenTrickler-Firmware-${TAG}.uf2"
+
           gh release upload "$TAG" \
             publish_out/manifest.json \
             publish_out/app.bin \
+            "publish_out/OpenTrickler-Firmware-${TAG}.uf2" \
             --repo "${{ github.repository }}" \
             --clobber
 
-          echo "Attached manifest.json and app.bin to release $TAG."
+          echo "Attached manifest.json, app.bin and OpenTrickler-Firmware-${TAG}.uf2 to release $TAG."
           echo "Any device pointed at ${{ github.repository }} in"
-          echo "Settings > Firmware Update will see this as the latest update."
+          echo "Settings > Firmware Update will see this as the latest update,"
+          echo "and a fresh board can flash the .uf2 directly for its first install."

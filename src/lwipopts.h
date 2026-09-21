@@ -36,6 +36,23 @@
 
 // // ping_thread sets socket receive timeout, so enable this feature
 #define LWIP_SO_RCVTIMEO 1
+// ota_client.c/ota_tls.c set a send timeout too (SO_SNDTIMEO) so an outbound
+// write can never block forever; without this it's silently a no-op.
+#define LWIP_SO_SNDTIMEO 1
+
+// This firmware's web server and mDNS responder only ever used lwIP's raw
+// tcp_*/udp_* API, which never goes through netconn -- so these netconn
+// mailbox sizes were never given explicit values and stayed at their
+// lwIP default of 0 (see lwip/opt.h). A size-0 mailbox becomes a
+// zero-length FreeRTOS queue in this port's sys_mbox_new(), which is
+// undefined behaviour on FreeRTOS (xQueueCreate() requires length >= 1).
+// ota_client.c's outbound TLS client is the first thing in this codebase
+// to actually open a socket via lwip_socket()/lwip_connect(), which goes
+// through netconn and therefore through these mailboxes -- and hung/locked
+// up the whole board right at that step until these were sized properly.
+#define DEFAULT_TCP_RECVMBOX_SIZE  8
+#define DEFAULT_ACCEPTMBOX_SIZE    4
+#define DEFAULT_UDP_RECVMBOX_SIZE  4
 #endif
 
 // Lwip features
