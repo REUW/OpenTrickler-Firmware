@@ -61,6 +61,35 @@ Base: `Opentrickler_ML` `2026.07.12-beta.14`.
 - **Branding** — TP Custom Rifle Parts logo in the web portal and as the
   boot-splash bitmap on the 128x64 display, plus a modernized UI with light
   and dark mode.
+- **Check for Updates from the GUI (direct from GitHub, real TLS)** —
+  Settings → Firmware Update now has a "Check for Updates" section. Set it
+  to your GitHub owner/repo once (via the new **GitHub Owner / Org** /
+  **GitHub Repository** fields), and the device checks
+  `github.com/<owner>/<repo>/releases/latest/download/manifest.json` and
+  `.../app.bin` directly over a real, certificate-verified HTTPS
+  connection — no server of your own to run, no maintainer secrets, nothing
+  to keep online. A minimal TLS 1.2 client (mbedTLS layered over the
+  existing lwIP sockets stack, `src/ota_tls.c`) verifies GitHub's
+  certificate chain against a small curated bundle of well-known root CAs
+  embedded in the firmware (`src/ota_tls_roots.c`, sourced from Mozilla's
+  root program via `certifi`), the same way a browser would, before
+  trusting anything it downloads. The device shows the latest version and
+  your notes/changelog text, and — with "Update Now" — downloads `app.bin`
+  and stages it in the existing OTA staging area used by
+  `tools/ota_upload.py`, all over WiFi with no laptop involved. Both
+  checking and applying are explicit button presses — nothing runs on a
+  timer or happens without you pressing a button, since this firmware
+  controls reloading equipment. New REST endpoints: `/rest/update_config`,
+  `/rest/update_check`, `/rest/update_status`, `/rest/update_apply`. New
+  EEPROM region for the owner/repo settings (`EEPROM_UPDATE_CONFIG_BASE_ADDR`,
+  15K) — this is a brand-new region, so it doesn't affect or reset any
+  existing settings. `.github/workflows/publish-update-manifest.yml`
+  automates the publishing side: on every published GitHub release it
+  builds the firmware (same steps as `cmake.yml`), runs
+  `tools/publish_update_manifest.py`, and attaches `manifest.json` +
+  `app.bin` straight to that same release using GitHub's own automatically
+  provided token — **zero repository secrets to create or manage**. See
+  QUICKSTART.md section 11.
 
 ### Changed
 

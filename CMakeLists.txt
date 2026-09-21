@@ -12,6 +12,11 @@ message(STATUS "CMAKE_SOURCE_DIR: ${CMAKE_SOURCE_DIR}")
 set(ENV{PICO_SDK_PATH} "${CMAKE_SOURCE_DIR}/library/pico-sdk")
 set(PICO_SDK_PATH $ENV{PICO_SDK_PATH})
 
+# ota_client.c/ota_tls.c's own minimal mbedTLS config (TLS 1.2 client only,
+# tuned RAM footprint) -- must be set before pico_sdk_init() pulls in
+# pico_mbedtls's own CMakeLists.txt, which reads this variable.
+set(PICO_MBEDTLS_CONFIG_FILE "${CMAKE_SOURCE_DIR}/src/ota_mbedtls_config.h")
+
 # Include the Pico SDK
 include(${PICO_SDK_PATH}/pico_sdk_init.cmake)
 
@@ -131,6 +136,12 @@ target_link_libraries("${TARGET_NAME}"
     pico_lwip_freertos
     pico_lwip_mdns
     # pico_lwip_http
+
+    # TLS client for ota_client.c/ota_tls.c (self-update checks against
+    # github.com / *.githubusercontent.com). See src/ota_mbedtls_config.h
+    # for why this is a minimal, TLS-1.2-client-only mbedTLS build rather
+    # than the SDK's full default config.
+    pico_mbedtls
 )
 
 target_link_options("${TARGET_NAME}" PUBLIC -Wl,--gc-sections -Wl,--print-memory-usage)

@@ -17,6 +17,7 @@
 #define EEPROM_PROFILE_DATA_BASE_ADDR           9 * 1024       // 9k
 #define EEPROM_SERVO_GATE_CONFIG_BASE_ADDR     10 * 1024       // 10k
 #define EEPROM_AI_TUNING_CONFIG_BASE_ADDR      14 * 1024       // 14k
+#define EEPROM_UPDATE_CONFIG_BASE_ADDR         15 * 1024       // 15k
 
 #define EEPROM_METADATA_REV                     2              // 16 byte 
 

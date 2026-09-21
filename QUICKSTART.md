@@ -147,6 +147,81 @@ charge-mode settings, and its kernel weight — enough to fully restore that
 profile via Import on another controller or after a reset. Worth doing
 once you have a profile you trust.
 
+## 11. Optional: Check for Updates from the GUI
+
+Settings → Firmware Update → "Check for Updates" lets the controller check
+and install new firmware over WiFi by itself, without a laptop or the
+`tools/ota_upload.py` script. The device talks to **GitHub directly** over a
+real, certificate-verified HTTPS connection (it has its own built-in TLS 1.2
+client — see `src/ota_tls.c` — trusting a small bundle of well-known root
+CAs embedded in the firmware, the same way a browser would). There is no
+server of your own to run and nothing to keep online: GitHub hosts the two
+files the device needs, at a fixed, predictable URL for whatever release you
+most recently published:
+
+```
+https://github.com/<owner>/<repo>/releases/latest/download/manifest.json
+https://github.com/<owner>/<repo>/releases/latest/download/app.bin
+```
+
+**One-time setup, when you cut a release:**
+
+1. After building a release, run:
+   ```
+   python3 tools/publish_update_manifest.py \
+       --bin build-pico2w-release/app.bin \
+       --version "$(git describe --tags --always --dirty)" \
+       --notes "See CHANGELOG.md" \
+       --out-dir publish_out
+   ```
+   This writes `publish_out/app.bin` and `publish_out/manifest.json`:
+   ```json
+   {
+     "version": "2026.09.21-fork.6",
+     "notes": "See CHANGELOG.md",
+     "size": 992960,
+     "crc32": "0x1A2B3C4D"
+   }
+   ```
+2. Attach both files to the GitHub Release you're publishing (drag them onto
+   the release's asset list in the GitHub UI, or `gh release upload
+   <tag> publish_out/manifest.json publish_out/app.bin`).
+
+   If you cut releases on GitHub (this fork lives at
+   [thomaspember1990/OpenTrickler-Firmware](https://github.com/thomaspember1990/OpenTrickler-Firmware))
+   and want this automated,
+   `.github/workflows/publish-update-manifest.yml` is already wired up: it
+   fires on every published GitHub release, builds the firmware the same way
+   `cmake.yml` does, runs `publish_update_manifest.py`, and uploads both
+   files straight to that same release using GitHub's own automatically
+   provided token. **No repository secrets to create or manage at all** —
+   publishing a GitHub release is the entire workflow.
+
+**On the device, once:**
+
+1. Settings → Firmware Update → set **GitHub Owner / Org** (e.g.
+   `thomaspember1990`) and **GitHub Repository** (e.g.
+   `OpenTrickler-Firmware`), then **Save Repository**.
+
+**Whenever you want to check:**
+
+1. Click **Check for Updates**. The page shows your running version next to
+   the latest one it found, plus your `--notes` text.
+2. If a newer version is available, click **Update Now**. The device
+   downloads `app.bin` straight from GitHub into the same OTA staging area
+   used by `tools/ota_upload.py`, verifying GitHub's certificate chain
+   during download and the file's CRC32 once it's complete, and — once your
+   firmware includes an OTA bootloader transition build (see the in-app note
+   on that page) — applies it and reboots on its own.
+
+Every downloader's device does this same direct-to-GitHub check
+independently; nothing is shared or run centrally on your end beyond
+attaching two files to each release.
+
+Nothing here ever happens automatically: checking and applying are both
+explicit button presses, so firmware never changes mid-session on
+reloading equipment you're actively using.
+
 ## Getting help
 
 - Full list of what this fork changes vs. upstream: [CHANGELOG.md](CHANGELOG.md)

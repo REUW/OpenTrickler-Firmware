@@ -1,11 +1,24 @@
 #ifndef _LWIPOPTS_H
 #define _LWIPOPTS_H
 
+// lwipopts_examples_common.h defaults LWIP_SOCKET to 0 (guarded by #ifndef,
+// since the httpd/REST layer in http_rest.c only ever needed the raw API),
+// so it has to be turned on here, before that header is pulled in, for
+// ota_client.c's outbound HTTP client (lwip/sockets.h + lwip/netdb.h) to be
+// usable.
+#define LWIP_SOCKET 1
+
 // Generally you would define your own explicit list of lwIP options
 // (see https://www.nongnu.org/lwip/2_1_x/group__lwip__opts.html)
 //
 // This example uses a common include to avoid repetition
 #include "lwipopts_examples_common.h"
+
+// lwipopts_examples_common.h #defines LWIP_NETCONN to 0 unconditionally (no
+// #ifndef guard), but the socket API is implemented on top of netconn, so it
+// has to be turned back on here, after that header, for ota_client.c.
+#undef LWIP_NETCONN
+#define LWIP_NETCONN 1
 
 
 
@@ -35,7 +48,12 @@
 #define LWIP_HTTPD_MAX_REQUEST_URI_LEN  1200
 #define LWIP_HTTPD_MAX_CGI_PARAMETERS   32
 #define LWIP_HTTPD_DYNAMIC_HEADERS      0
-#define LWIP_SOCKETS 1
+
+// Outbound HTTP client support (self-hosted firmware update checks), used by
+// ota_client.c. LWIP_DNS is already 1 in lwipopts_examples_common.h; just
+// give ourselves a second DNS server slot since STA mode can hand us more
+// than one via DHCP.
+#define DNS_MAX_SERVERS 2
 
 // MDNS
 #define LWIP_MDNS_RESPONDER 1

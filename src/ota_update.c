@@ -766,3 +766,222 @@ bool http_rest_ota_apply(struct fs_file *file, int num_params, char *params[], c
     return true;
 #endif
 }
+
+// ---------------------------------------------------------------------------
+// Internal staging API (used directly by ota_client.c). Mirrors the REST
+// handlers above but takes/returns plain values instead of building JSON, and
+// ota_stage_write() takes raw bytes instead of a hex string so a downloaded
+// image can be written straight from the network read buffer.
+// ---------------------------------------------------------------------------
+
+bool ota_stage_supported(void) {
+    return ota_supported();
+}
+
+uint32_t ota_stage_capacity(void) {
+    return ota_storage_capacity();
+}
+
+uint32_t ota_stage_primary_limit(void) {
+    return ota_primary_image_limit();
+}
+
+uint32_t ota_stage_chunk_size(void) {
+    return OTA_MAX_CHUNK_BYTES;
+}
+
+const char *ota_stage_last_error(void) {
+    return g_ota_session.last_error;
+}
+
+bool ota_stage_begin(uint32_t size, uint32_t expected_crc32) {
+    memset(&g_ota_session, 0, sizeof(g_ota_session));
+
+    if (!ota_supported()) {
+        ota_set_error("OTA staging is not supported on this flash layout");
+        return false;
+    }
+
+    if (size == 0 || size > ota_storage_capacity() || size > ota_primary_image_limit()) {
+        ota_set_error("image does not fit OTA slots");
+        return false;
+    }
+
+    if (!ota_invalidate_metadata()) {
+        ota_set_error("could not invalidate previous OTA metadata");
+        return false;
+    }
+
+    g_ota_session.active = true;
+    g_ota_session.expected_size = size;
+    g_ota_session.expected_crc32 = expected_crc32;
+    g_ota_session.actual_crc32 = 0;
+    g_ota_session.received_size = 0;
+    g_ota_session.verified = false;
+    ota_clear_error();
+    return true;
+}
+
+bool ota_stage_write(uint32_t offset, const uint8_t *data, size_t len) {
+    if (!g_ota_session.active) {
+        ota_set_error("no OTA upload is active");
+        return false;
+    }
+
+    if (data == NULL || len == 0 || len > OTA_MAX_CHUNK_BYTES) {
+        ota_set_error("bad chunk request");
+        return false;
+    }
+
+    if (offset != g_ota_session.received_size || (offset % FLASH_PAGE_SIZE) != 0) {
+        ota_set_error("chunks must be sequential and page aligned");
+        return false;
+    }
+
+    if (offset + len > g_ota_session.expected_size || offset + len > ota_storage_capacity()) {
+        ota_set_error("chunk exceeds expected image size");
+        return false;
+    }
+
+    if ((len % FLASH_PAGE_SIZE) != 0 && offset + len != g_ota_session.expected_size) {
+        ota_set_error("non-final chunks must end on a flash page boundary");
+        return false;
+    }
+
+    memcpy(g_flash_page, data, len);
+
+    size_t program_len = len;
+    if (program_len % FLASH_PAGE_SIZE != 0) {
+        program_len = ((program_len / FLASH_PAGE_SIZE) + 1u) * FLASH_PAGE_SIZE;
+    }
+    if (len < program_len) {
+        memset(g_flash_page + len, 0xFF, program_len - len);
+    }
+
+    for (uint32_t page_offset = 0; page_offset < program_len; page_offset += FLASH_PAGE_SIZE) {
+        uint32_t flash_offset = OTA_IMAGE_OFFSET + offset + page_offset;
+
+        if (((offset + page_offset) % FLASH_SECTOR_SIZE) == 0) {
+            if (!ota_flash_erase(flash_offset, FLASH_SECTOR_SIZE)) {
+                return false;
+            }
+        }
+
+        if (!ota_flash_program_page(flash_offset, g_flash_page + page_offset)) {
+            return false;
+        }
+    }
+
+    const uint8_t *flash_ptr = ota_image_flash() + offset;
+    if (memcmp(flash_ptr, g_flash_page, len) != 0) {
+        ota_set_error("page verify failed");
+        return false;
+    }
+
+    g_ota_session.actual_crc32 = crc32_update(g_ota_session.actual_crc32, flash_ptr, len);
+    g_ota_session.received_size += (uint32_t)len;
+    ota_clear_error();
+    return true;
+}
+
+bool ota_stage_finalize(uint32_t *out_crc32) {
+    if (!g_ota_session.active) {
+        ota_set_error("no OTA upload is active");
+        return false;
+    }
+
+    if (g_ota_session.received_size != g_ota_session.expected_size) {
+        ota_set_error("upload is incomplete");
+        return false;
+    }
+
+    uint32_t flash_crc = crc32_buffer(ota_image_flash(), g_ota_session.expected_size);
+    g_ota_session.actual_crc32 = flash_crc;
+
+    if (flash_crc != g_ota_session.expected_crc32) {
+        ota_set_error("CRC mismatch");
+        return false;
+    }
+
+    if (!ota_write_metadata(g_ota_session.expected_size,
+                            g_ota_session.expected_crc32,
+                            g_ota_session.actual_crc32)) {
+        ota_set_error("metadata write failed");
+        return false;
+    }
+
+    g_ota_session.verified = true;
+    g_ota_session.active = false;
+    ota_clear_error();
+
+    if (out_crc32 != NULL) {
+        *out_crc32 = flash_crc;
+    }
+    return true;
+}
+
+bool ota_stage_apply(void) {
+    const ota_metadata_t *meta = ota_metadata_flash();
+    if (!ota_metadata_is_valid(meta)) {
+        ota_set_error("no verified staged firmware is available");
+        return false;
+    }
+
+#if OTA_BOOTLOADER_APPLY_SUPPORTED
+    if (g_ota_apply_scheduled) {
+        return true;
+    }
+
+    uint32_t image_size = meta->image_size;
+    uint32_t program_size = OTA_ALIGN_UP(image_size, FLASH_PAGE_SIZE);
+    uint32_t erase_size = OTA_ALIGN_UP(program_size, FLASH_SECTOR_SIZE);
+    if (program_size == 0u ||
+        erase_size > OTA_METADATA_OFFSET ||
+        program_size > ota_primary_image_limit()) {
+        ota_set_error("staged firmware does not fit the primary slot");
+        return false;
+    }
+
+    const uint8_t *image = ota_image_flash();
+    if (ota_staged_image_has_container_magic(image, image_size)) {
+        ota_set_error("staged file looks like UF2/ELF; firmware must be app.bin");
+        return false;
+    }
+
+    uint32_t staged_crc = crc32_buffer(image, image_size);
+    if (staged_crc != meta->expected_crc32 || staged_crc != meta->actual_crc32) {
+        ota_set_error("staged firmware CRC no longer matches metadata");
+        return false;
+    }
+
+    g_ota_apply_params.image_size = image_size;
+    g_ota_apply_params.expected_crc32 = meta->expected_crc32;
+    g_ota_apply_params.actual_crc32 = staged_crc;
+    g_ota_apply_scheduled = true;
+
+    BaseType_t task_created = xTaskCreate(ota_apply_task,
+                                          "OTA Apply",
+                                          OTA_APPLY_TASK_STACK_WORDS,
+                                          NULL,
+                                          configMAX_PRIORITIES - 1,
+                                          NULL);
+    if (task_created != pdPASS) {
+        g_ota_apply_scheduled = false;
+        ota_set_error("could not create OTA apply task");
+        return false;
+    }
+
+    ota_clear_error();
+    return true;
+#else
+    ota_set_error("verified image is staged, but this firmware has no OTA bootloader yet");
+    return false;
+#endif
+}
+
+void ota_stage_abort(void) {
+    memset(&g_ota_session, 0, sizeof(g_ota_session));
+    if (ota_supported()) {
+        ota_invalidate_metadata();
+    }
+}

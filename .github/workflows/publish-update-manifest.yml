@@ -1,0 +1,89 @@
+name: Publish Update Manifest
+
+run-name: Publish update manifest for ${{ github.event.release.tag_name || github.ref_name }}
+
+# Builds firmware exactly like cmake.yml, then attaches manifest.json +
+# app.bin to the GitHub Release that triggered this run. Every device out
+# there checks GitHub directly (Settings > Firmware Update > "Check for
+# Updates") at:
+#
+#   https://github.com/<owner>/<repo>/releases/latest/download/manifest.json
+#   https://github.com/<owner>/<repo>/releases/latest/download/app.bin
+#
+# so once these two files are attached to a release, it's live -- no server
+# of your own to run, no secrets to configure. This workflow uses GitHub's
+# own automatically-provided GITHUB_TOKEN (scoped to just this repo, just
+# this run) to upload the assets; you don't create or manage any credential
+# for it. See QUICKSTART.md, section 11, and src/ota_client.c / src/ota_tls.c.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string to publish (defaults to the tag that triggered this run)"
+        required: false
+
+permissions:
+  contents: write  # required so gh release upload can attach assets to the release
+
+jobs:
+  publish:
+    name: Build and attach update assets to the release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib \
+            ninja-build \
+            python3
+
+      - name: Configure
+        run: |
+          cmake -B "${{ github.workspace }}/build-pico2_w" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_BOARD=pico2_w
+
+      - name: Build
+        run: cmake --build "${{ github.workspace }}/build-pico2_w" --config Release
+
+      - name: Build manifest + stage release assets
+        run: |
+          VERSION="${{ github.event.inputs.version || github.event.release.tag_name || github.ref_name }}"
+          python3 tools/publish_update_manifest.py \
+            --bin "build-pico2_w/app.bin" \
+            --version "$VERSION" \
+            --notes "${{ github.event.release.body }}" \
+            --out-dir "publish_out"
+
+      - name: Attach manifest.json + app.bin to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name || github.ref_name }}"
+          # --clobber lets re-running this workflow (or workflow_dispatch)
+          # replace previously-uploaded assets on the same release.
+          gh release upload "$TAG" \
+            publish_out/manifest.json \
+            publish_out/app.bin \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+          echo "Attached manifest.json and app.bin to release $TAG."
+          echo "Any device pointed at ${{ github.repository }} in"
+          echo "Settings > Firmware Update will see this as the latest update."

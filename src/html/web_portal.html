@@ -1748,6 +1748,63 @@ html[data-ot-theme="dark"], html[data-ot-theme="dark"] {
                             </div>
 
                             <pre id="otaStatusText" class="text-xs whitespace-pre-wrap bg-base-200 rounded-box p-3">OTA status not loaded.</pre>
+
+                            <div class="divider"></div>
+
+                            <div class="card bg-base-200">
+                                <div class="card-body">
+                                    <h3 class="card-title">Check for Updates</h3>
+                                    <p class="text-sm">
+                                        The device checks GitHub directly over a verified HTTPS connection
+                                        for the latest release of this GitHub repository, then downloads and
+                                        stages the firmware itself over WiFi -- no laptop, no server, and
+                                        nothing to run on your end. To publish an update, just attach
+                                        <code>manifest.json</code> and <code>app.bin</code> to a GitHub
+                                        Release (the included GitHub Actions workflow can do this for you
+                                        automatically). See QUICKSTART.md for the manifest format.
+                                    </p>
+
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <div class="grid grid-cols-1 gap-1">
+                                            <span class="label-text">GitHub Owner / Org</span>
+                                            <input type="text" class="input input-bordered" id="updateConfigOwner" placeholder="thomaspember1990">
+                                        </div>
+                                        <div class="grid grid-cols-1 gap-1">
+                                            <span class="label-text">GitHub Repository</span>
+                                            <input type="text" class="input input-bordered" id="updateConfigRepo" placeholder="OpenTrickler-Firmware">
+                                        </div>
+                                    </div>
+                                    <div class="flex gap-2">
+                                        <button class="btn btn-neutral" onclick="saveUpdateConfig()">Save Repository</button>
+                                    </div>
+
+                                    <div class="divider"></div>
+
+                                    <div class="stats stats-vertical md:stats-horizontal shadow">
+                                        <div class="stat">
+                                            <div class="stat-title">Running Version</div>
+                                            <div id="updateCurrentVersionStat" class="stat-value text-lg">Unknown</div>
+                                        </div>
+                                        <div class="stat">
+                                            <div class="stat-title">Latest Available</div>
+                                            <div id="updateLatestVersionStat" class="stat-value text-lg">Unknown</div>
+                                            <div id="updateLatestVersionDesc" class="stat-desc">Check for updates to see what's available.</div>
+                                        </div>
+                                    </div>
+
+                                    <div id="updateNotesBox" class="alert" style="display: none;">
+                                        <span id="updateNotesText"></span>
+                                    </div>
+
+                                    <div class="flex gap-2">
+                                        <button class="btn btn-neutral" id="updateCheckBtn" onclick="checkForUpdates()">Check for Updates</button>
+                                        <button class="btn btn-warning" id="updateApplyBtn" onclick="applyUpdateNow()" disabled>Update Now</button>
+                                    </div>
+
+                                    <progress id="updateApplyProgress" class="progress progress-warning w-full" value="0" max="100" style="display: none;"></progress>
+                                    <pre id="updateStatusText" class="text-xs whitespace-pre-wrap bg-base-300 rounded-box p-3">Update status not loaded.</pre>
+                                </div>
+                            </div>
                         </div>
                     </section>
 
@@ -1766,7 +1823,7 @@ html[data-ot-theme="dark"], html[data-ot-theme="dark"] {
 
                             <div class="grid grid-cols-1 gap-1">
                                 <span class="label-text">Fork Build Marker</span>
-                                <input type="text" class="input input-bordered" value="TP-fork-2026-09-20-profile-page-merge-fix" disabled="disabled" readonly>
+                                <input type="text" class="input input-bordered" value="TP-fork-2026-09-21-tls-github-direct-ota" disabled="disabled" readonly>
                                 <span class="label-text-alt opacity-70 ot-help">Identifies exactly which build of this fork is running, independent of the firmware version/VCS hash above. Useful when confirming a freshly flashed .uf2 actually took effect.</span>
                             </div>
 
@@ -2786,6 +2843,7 @@ const ChargeModeState = Object.freeze({
         }
 
         // Populate values
+        _stopUpdateStatusPoll();
         if (sectionId === 'settings-ai-tuning') {
             loadAiTuningPage();
             _startAiHistoryPoll();
@@ -2793,6 +2851,8 @@ const ChargeModeState = Object.freeze({
         else if (sectionId === 'settings-firmware-update') {
             _stopAiHistoryPoll();
             otaRefreshStatus();
+            loadUpdateConfig();
+            refreshUpdateStatus();
         }
         else if (sectionId === 'settings-profile') {
             // Merged page: profile PID/speed fields and charge-mode fields
@@ -3801,6 +3861,174 @@ const ChargeModeState = Object.freeze({
         }
         catch (e) {
             alert("Apply request did not return cleanly. If the device rebooted, wait a few seconds and refresh. Error: " + e.message);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Direct-to-GitHub update check/apply (Settings > Firmware Update). The
+    // device checks and downloads releases straight from GitHub over a
+    // verified HTTPS connection -- no server of your own needed. See
+    // /rest/update_config, /rest/update_check, /rest/update_status,
+    // /rest/update_apply.
+    // ---------------------------------------------------------------------
+
+    async function loadUpdateConfig() {
+        try {
+            const response = await fetch("/rest/update_config");
+            if (!response.ok) throw new Error("HTTP " + response.status);
+            const data = await response.json();
+            document.getElementById("updateConfigOwner").value = data.u0 || "";
+            document.getElementById("updateConfigRepo").value = data.u1 || "";
+            document.getElementById("updateCurrentVersionStat").innerText = data.current_version || "Unknown";
+        }
+        catch (e) {
+            console.error("Failed to load update repository settings:", e);
+        }
+    }
+
+    async function saveUpdateConfig() {
+        const owner = document.getElementById("updateConfigOwner").value;
+        const repo = document.getElementById("updateConfigRepo").value;
+        const uri = `/rest/update_config?u0=${encodeURIComponent(owner)}&u1=${encodeURIComponent(repo)}&ee=true`;
+
+        try {
+            const response = await fetch(uri);
+            if (!response.ok) throw new Error("HTTP " + response.status);
+            const settingsAppliedSuccessDialog = document.getElementById("settingsAppliedSuccessDialog");
+            settingsAppliedSuccessDialog.showModal();
+        }
+        catch (e) {
+            alert("Failed to save update repository settings: " + e.message);
+        }
+    }
+
+    async function checkForUpdates() {
+        const btn = document.getElementById("updateCheckBtn");
+        btn.disabled = true;
+        try {
+            const response = await fetch("/rest/update_check");
+            const data = await response.json();
+            if (!data.success) {
+                alert(data.message || "Could not start update check");
+                btn.disabled = false;
+                return;
+            }
+            _startUpdateStatusPoll();
+        }
+        catch (e) {
+            alert("Failed to start update check: " + e.message);
+            btn.disabled = false;
+        }
+    }
+
+    async function applyUpdateNow() {
+        if (!confirm("This will download the new firmware over WiFi, flash it, and reboot the device. Continue?")) {
+            return;
+        }
+        const btn = document.getElementById("updateApplyBtn");
+        btn.disabled = true;
+        document.getElementById("updateApplyProgress").style.display = "block";
+        document.getElementById("updateApplyProgress").value = 0;
+        try {
+            const response = await fetch("/rest/update_apply");
+            const data = await response.json();
+            if (!data.success) {
+                alert(data.message || "Could not start update");
+                btn.disabled = false;
+                return;
+            }
+            _startUpdateStatusPoll();
+        }
+        catch (e) {
+            alert("Failed to start update: " + e.message);
+            btn.disabled = false;
+        }
+    }
+
+    let _updateStatusPollId = null;
+    function _startUpdateStatusPoll() {
+        _stopUpdateStatusPoll();
+        refreshUpdateStatus();
+        _updateStatusPollId = setInterval(refreshUpdateStatus, 2000);
+    }
+    function _stopUpdateStatusPoll() {
+        if (_updateStatusPollId) { clearInterval(_updateStatusPollId); _updateStatusPollId = null; }
+    }
+
+    async function refreshUpdateStatus() {
+        const statusText = document.getElementById("updateStatusText");
+        const checkBtn = document.getElementById("updateCheckBtn");
+        const applyBtn = document.getElementById("updateApplyBtn");
+        const progress = document.getElementById("updateApplyProgress");
+        const latestStat = document.getElementById("updateLatestVersionStat");
+        const latestDesc = document.getElementById("updateLatestVersionDesc");
+        const notesBox = document.getElementById("updateNotesBox");
+        const notesText = document.getElementById("updateNotesText");
+        if (!statusText) return;  // not on the Firmware Update page
+
+        try {
+            const response = await fetch("/rest/update_status");
+            if (!response.ok) throw new Error("HTTP " + response.status);
+            const data = await response.json();
+
+            document.getElementById("updateCurrentVersionStat").innerText = data.current_version || "Unknown";
+
+            if (data.check_state === "checking") {
+                latestStat.innerText = "Checking...";
+                latestStat.className = "stat-value text-lg";
+                latestDesc.innerText = "";
+            }
+            else if (data.check_state === "checked") {
+                latestStat.innerText = data.latest_version || "Unknown";
+                latestStat.className = "stat-value text-lg " + (data.update_available ? "text-warning" : "text-success");
+                latestDesc.innerText = data.update_available ? "An update is available." : "You're up to date.";
+            }
+            else if (data.check_state === "check_failed") {
+                latestStat.innerText = "Check failed";
+                latestStat.className = "stat-value text-lg text-error";
+                latestDesc.innerText = data.check_error || "";
+            }
+
+            if (data.notes) {
+                notesBox.style.display = "block";
+                notesText.innerText = data.notes;
+            }
+            else {
+                notesBox.style.display = "none";
+            }
+
+            const busy = (data.check_state === "checking") || (data.apply_state === "downloading") || (data.apply_state === "applying");
+            checkBtn.disabled = busy;
+            applyBtn.disabled = busy || !data.update_available;
+
+            if (data.apply_state === "downloading") {
+                progress.style.display = "block";
+                progress.value = data.apply_total > 0 ? Math.round((data.apply_received / data.apply_total) * 100) : 0;
+            }
+            else if (data.apply_state === "applying") {
+                progress.style.display = "block";
+                progress.value = 100;
+                statusText.innerText = "Update staged; the device is applying it now and will reboot shortly. This page will stop responding for a few seconds -- that's expected. Refresh once it's back.";
+                _stopUpdateStatusPoll();
+                return;
+            }
+            else if (data.apply_state === "failed") {
+                progress.style.display = "none";
+                _stopUpdateStatusPoll();
+                alert("Update failed: " + (data.apply_error || "unknown error"));
+            }
+            else {
+                progress.style.display = "none";
+            }
+
+            statusText.innerText = JSON.stringify(data, null, 2);
+
+            if (!busy) {
+                _stopUpdateStatusPoll();
+            }
+        }
+        catch (e) {
+            statusText.innerText = "Failed to read update status: " + e.message;
         }
     }
 

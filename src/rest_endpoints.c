@@ -20,6 +20,7 @@
 #include "flash_storage.h"
 #include "display_config.h"
 #include "ota_update.h"
+#include "ota_client.h"
 
 // Generated headers by html2header.py under scripts
 #include "display_mirror.html.h"
@@ -162,6 +163,12 @@ bool rest_endpoints_init(bool default_wizard) {
     rest_register_handler("/rest/ota_finalize", http_rest_ota_finalize);
     rest_register_handler("/rest/ota_abort", http_rest_ota_abort);
     rest_register_handler("/rest/ota_apply", http_rest_ota_apply);
+
+    ota_client_init();
+    rest_register_handler("/rest/update_config", http_rest_update_config);
+    rest_register_handler("/rest/update_check", http_rest_update_check);
+    rest_register_handler("/rest/update_status", http_rest_update_status);
+    rest_register_handler("/rest/update_apply", http_rest_update_apply);
 
     // Initialize flash storage for ML history
     flash_storage_init();
