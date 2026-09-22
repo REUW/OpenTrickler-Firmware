@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <semphr.h>
 #include <inttypes.h>
+#include <task.h>
 
 #include "configuration.h"
 #include "scale.h"
@@ -203,6 +204,9 @@ bool scale_init() {
     // Initialize the measurement variable
     scale_config.current_scale_measurement = NAN;
 
+    // Polling pause refcount starts at 0 (polling allowed)
+    scale_config.polling_pause_count = 0;
+
     // Initialize the driver handle
     printf("Scale driver: %x\n", scale_config.persistent_config.scale_driver);
     set_scale_driver(scale_config.persistent_config.scale_driver);
@@ -251,6 +255,19 @@ void scale_write(const char * command, size_t len) {
     _give_mutex(scheduler_state);
 }
 
+void scale_pause_polling(void) {
+    taskENTER_CRITICAL();
+    scale_config.polling_pause_count++;
+    taskEXIT_CRITICAL();
+}
+
+void scale_resume_polling(void) {
+    taskENTER_CRITICAL();
+    if (scale_config.polling_pause_count > 0) {
+        scale_config.polling_pause_count--;
+    }
+    taskEXIT_CRITICAL();
+}
 
 float scale_get_current_measurement() {
     return scale_config.current_scale_measurement;
@@ -351,7 +368,10 @@ bool http_rest_scale_action(struct fs_file *file, int num_params, char *params[]
             switch (action) {
                 case SCALE_ACTION_FORCE_ZERO:
                     if (scale_config.scale_handle->force_zero != NULL) {
+                        scale_pause_polling();
                         scale_config.scale_handle->force_zero();
+                        vTaskDelay(pdMS_TO_TICKS(700));
+                        scale_resume_polling();
                     }
                     break;
                 default: 

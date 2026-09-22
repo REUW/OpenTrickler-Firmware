@@ -76,58 +76,62 @@ void _gng_scale_listener_task(void *p) {
     gngscale_standard_data_format_t frame;
 
     while (true) {
-        // Reset frame buffer index at the start of each poll cycle (fixes partial-frame carryover on timeout)
+        // Reset frame buffer index at the start of each poll cycle
         string_buf_idx = 0;
 
-        // Clear any stale data in RX buffer before sending request
-        while (uart_is_readable(SCALE_UART)) {
-            uart_getc(SCALE_UART);
-        }
-
-        // Request for a data transfer using mutex-protected write
-        scale_write(CMD_REQUEST_DATA_TRANSFER, strlen(CMD_REQUEST_DATA_TRANSFER));
-
-        // Wait for scale to respond (up to 200ms)
-        TickType_t start_tick = xTaskGetTickCount();
-        bool got_response = false;
-
-        while ((xTaskGetTickCount() - start_tick) < pdMS_TO_TICKS(200)) {
+        // Only send a poll request when polling is not paused.
+        if (scale_config.polling_pause_count == 0) {
+            // Clear any stale data in RX buffer before sending request
             while (uart_is_readable(SCALE_UART)) {
-                char ch = uart_getc(SCALE_UART);
-                frame.bytes[string_buf_idx++] = ch;
-
-                // If we have received 14 bytes then we can decode the message
-                if (string_buf_idx == sizeof(gngscale_standard_data_format_t)) {
-                    // Data is ready, send to decode
-                    scale_config.current_scale_measurement = _decode_measurement_msg(&frame);
-                    // Signal the data is ready
-                    if (scale_config.scale_measurement_ready) {
-                        xSemaphoreGive(scale_config.scale_measurement_ready);
-                    }
-
-                    // Reset
-                    string_buf_idx = 0;
-                    got_response = true;
-                }
-
-                // \n is the terminator. Reset on receiving it.
-                if (ch == '\n') {
-                    string_buf_idx = 0;
-                    if (got_response) {
-                        break;
-                    }
-                }
+                uart_getc(SCALE_UART);
             }
 
-            if (got_response) {
-                break;
-            }
+            // Request for a data transfer using mutex-protected write
+            scale_write(CMD_REQUEST_DATA_TRANSFER, strlen(CMD_REQUEST_DATA_TRANSFER));
 
-            // Small delay before checking again
-            vTaskDelay(pdMS_TO_TICKS(10));
+            // Wait for scale to respond (up to 200ms)
+            TickType_t start_tick = xTaskGetTickCount();
+            bool got_response = false;
+
+            while ((xTaskGetTickCount() - start_tick) < pdMS_TO_TICKS(200)) {
+                while (uart_is_readable(SCALE_UART)) {
+                    char ch = uart_getc(SCALE_UART);
+                    frame.bytes[string_buf_idx++] = ch;
+
+                    // If we have received 14 bytes then we can decode the message
+                    if (string_buf_idx == sizeof(gngscale_standard_data_format_t)) {
+                        scale_config.current_scale_measurement = _decode_measurement_msg(&frame);
+                        if (scale_config.scale_measurement_ready) {
+                            xSemaphoreGive(scale_config.scale_measurement_ready);
+                        }
+
+                        string_buf_idx = 0;
+                        got_response = true;
+                    }
+
+                    // \n is the terminator. Reset on receiving it.
+                    if (ch == '\n') {
+                        string_buf_idx = 0;
+                        if (got_response) {
+                            break;
+                        }
+                    }
+                }
+
+                if (got_response) {
+                    break;
+                }
+
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+        } else {
+            // Polling paused: drain leftover RX, do not send a new request.
+            while (uart_is_readable(SCALE_UART)) {
+                uart_getc(SCALE_UART);
+            }
         }
 
-        // Wait before next request
+        // Wait before next request (or next pause check)
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
@@ -146,6 +150,9 @@ void scalegng_press_print_key() {
 
 //ESC t -> 0x1B 0x74 0x0D 0x0A standard setting
 // ! t -> 0x21 0x74 0x0D 0x0A
+// Sends the tare command only. Callers wrap with
+// scale_pause_polling() / scale_resume_polling() when a quiet
+// settle period is required.
 void scalegng_press_tare_key() {
     scale_write(CMD_TARE_FUNC, strlen(CMD_TARE_FUNC));
 }

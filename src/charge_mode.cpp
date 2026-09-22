@@ -465,6 +465,21 @@ static bool charge_mode_capture_settled_measurement(uint32_t max_wait_ms,
     return charge_mode_try_get_current_measurement(measurement_out);
 }
 
+// Pause continuous polling, send tare, wait for the scale to settle, then resume.
+static void charge_mode_force_zero_with_settle(uint32_t settle_ms) {
+    if (scale_config.scale_handle == NULL ||
+        scale_config.scale_handle->force_zero == NULL) {
+        return;
+    }
+
+    scale_pause_polling();
+    scale_config.scale_handle->force_zero();
+    if (settle_ms > 0) {
+        vTaskDelay(pdMS_TO_TICKS(settle_ms));
+    }
+    scale_resume_polling();
+}
+
 static bool charge_mode_force_zero_and_wait_for_ai(void) {
     if (scale_config.scale_handle == NULL ||
         scale_config.scale_handle->force_zero == NULL) {
@@ -475,8 +490,15 @@ static bool charge_mode_force_zero_and_wait_for_ai(void) {
     charge_mode_set_live_phase("ai_tare", 0.0f, 0.0f);
     charge_mode_set_result_colour(charge_mode_config.eeprom_charge_mode_data.neopixel_not_ready_colour);
 
+    // Hold polling paused for the whole tare + settle window so the G&G
+    // poller cannot disturb the scale.
+    scale_pause_polling();
     scale_config.scale_handle->force_zero();
-    vTaskDelay(pdMS_TO_TICKS(350));
+    vTaskDelay(pdMS_TO_TICKS(1000));   // settle while quiet
+    scale_resume_polling();
+
+    // Allow the first post-resume poll to complete before collecting samples.
+    vTaskDelay(pdMS_TO_TICKS(150));
 
     FloatRingBuffer tare_buffer(5);
     TickType_t start_tick = xTaskGetTickCount();
@@ -1143,7 +1165,7 @@ void charge_mode_wait_for_zero() {
             return;
         }
         else if (button_encoder_event == BUTTON_ENCODER_PRESSED) {
-            scale_config.scale_handle->force_zero();
+            charge_mode_force_zero_with_settle(700);
         }
 
         // Perform measurement (max delay 300 seconds   )
@@ -3856,7 +3878,7 @@ void charge_mode_wait_for_cup_return() {
             return;
         }
         else if (button_encoder_event == BUTTON_ENCODER_PRESSED) {
-            scale_config.scale_handle->force_zero();
+            charge_mode_force_zero_with_settle(700);
         }
 
         // Perform measurement
@@ -3877,7 +3899,7 @@ void charge_mode_wait_for_cup_return() {
 
     // Auto zero scale if enabled
     if (charge_mode_config.eeprom_charge_mode_data.auto_zero_on_cup_return) {
-        scale_config.scale_handle->force_zero();
+        charge_mode_force_zero_with_settle(700);
     }
 
     charge_mode_config.charge_mode_state = CHARGE_MODE_WAIT_FOR_ZERO;
