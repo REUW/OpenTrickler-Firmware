@@ -1,4 +1,6 @@
 #include <string.h>
+#include <stdio.h>
+#include <math.h>
 
 #include "profile.h"
 #include "eeprom.h"
@@ -93,6 +95,75 @@ const eeprom_profile_data_t default_profile_data = {
         .name = "Profile7",
     },
 };
+
+
+/*
+ * Escape a string for embedding inside a JSON string value.
+ * Handles ", \, and common control characters. Output is always NUL-terminated
+ * when out_len > 0.
+ */
+static void json_escape_string(const char *in, char *out, size_t out_len) {
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    if (in == NULL) {
+        out[0] = '\0';
+        return;
+    }
+
+    size_t o = 0;
+    for (size_t i = 0; in[i] != '\0' && (o + 1) < out_len; i++) {
+        unsigned char c = (unsigned char)in[i];
+        const char *esc = NULL;
+
+        switch (c) {
+            case '"':  esc = "\\\""; break;
+            case '\\': esc = "\\\\"; break;
+            case '\b': esc = "\\b";  break;
+            case '\f': esc = "\\f";  break;
+            case '\n': esc = "\\n";  break;
+            case '\r': esc = "\\r";  break;
+            case '\t': esc = "\\t";  break;
+            default:
+                break;
+        }
+
+        if (esc != NULL) {
+            for (size_t j = 0; esc[j] != '\0' && (o + 1) < out_len; j++) {
+                out[o++] = esc[j];
+            }
+        } else if (c < 0x20) {
+            // Other control chars as \u00XX
+            if ((o + 6) < out_len) {
+                int n = snprintf(&out[o], out_len - o, "\\u%04x", c);
+                if (n > 0) {
+                    o += (size_t)n;
+                }
+            } else {
+                break;
+            }
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+}
+
+
+/*
+ * Format a float for JSON. Non-finite values become null so the client
+ * never sees bare "nan" / "inf" tokens (invalid JSON).
+ */
+static void json_format_float(char *out, size_t out_len, float value, int decimals) {
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    if (!isfinite(value)) {
+        snprintf(out, out_len, "null");
+        return;
+    }
+    snprintf(out, out_len, "%.*f", decimals, (double)value);
+}
 
 
 bool profile_data_save(void) {
@@ -201,7 +272,10 @@ bool http_rest_profile_config(struct fs_file *file, int num_params, char *params
     // active/select (bool): make this the active runtime profile
     // read_only (bool): inspect profile without changing active profile
     // ee (bool): save to eeprom
-    static char buf[256];
+
+    // Was 256 and truncated the HTTP+JSON response, which caused
+    // JSON.parse failures in the web UI (Suggested PID Baseline).
+    static char buf[512];
 
     // Read the current loaded profile index
     uint8_t profile_idx = profile_get_selected_idx();
@@ -317,25 +391,41 @@ bool http_rest_profile_config(struct fs_file *file, int num_params, char *params
             }
         }
 
-        // Response
-        snprintf(buf, sizeof(buf), 
+        // Escape name and format floats so the response is always valid JSON.
+        // PROFILE_NAME_MAX_LEN is 16; escaped worst-case needs more room.
+        char escaped_name[PROFILE_NAME_MAX_LEN * 6 + 1];
+        json_escape_string(current_profile->name, escaped_name, sizeof(escaped_name));
+
+        char f_p3[24], f_p4[24], f_p5[24], f_p6[24], f_p7[24];
+        char f_p8[24], f_p9[24], f_p10[24], f_p11[24], f_p12[24];
+        json_format_float(f_p3,  sizeof(f_p3),  current_profile->coarse_kp, 3);
+        json_format_float(f_p4,  sizeof(f_p4),  current_profile->coarse_ki, 3);
+        json_format_float(f_p5,  sizeof(f_p5),  current_profile->coarse_kd, 3);
+        json_format_float(f_p6,  sizeof(f_p6),  current_profile->coarse_min_flow_speed_rps, 3);
+        json_format_float(f_p7,  sizeof(f_p7),  current_profile->coarse_max_flow_speed_rps, 3);
+        json_format_float(f_p8,  sizeof(f_p8),  current_profile->fine_kp, 3);
+        json_format_float(f_p9,  sizeof(f_p9),  current_profile->fine_ki, 3);
+        json_format_float(f_p10, sizeof(f_p10), current_profile->fine_kd, 3);
+        json_format_float(f_p11, sizeof(f_p11), current_profile->fine_min_flow_speed_rps, 3);
+        json_format_float(f_p12, sizeof(f_p12), current_profile->fine_max_flow_speed_rps, 3);
+
+        int written = snprintf(buf, sizeof(buf),
                  "%s"
-                 "{\"pf\":%d,\"p0\":%ld,\"p1\":%ld,\"p2\":\"%s\",\"p3\":%0.3f,\"p4\":%0.3f,\"p5\":%0.3f,\"p6\":%0.3f,\"p7\":%0.3f,\"p8\":%0.3f,\"p9\":%0.3f,\"p10\":%0.3f,\"p11\":%0.3f,\"p12\":%0.3f}",
+                 "{\"pf\":%d,\"p0\":%ld,\"p1\":%ld,\"p2\":\"%s\","
+                 "\"p3\":%s,\"p4\":%s,\"p5\":%s,\"p6\":%s,\"p7\":%s,"
+                 "\"p8\":%s,\"p9\":%s,\"p10\":%s,\"p11\":%s,\"p12\":%s}",
                  http_json_header,
-                 profile_idx, 
-                 current_profile->rev,
-                 current_profile->compatibility,
-                 current_profile->name,
-                 current_profile->coarse_kp,
-                 current_profile->coarse_ki,
-                 current_profile->coarse_kd,
-                 current_profile->coarse_min_flow_speed_rps,
-                 current_profile->coarse_max_flow_speed_rps,
-                 current_profile->fine_kp,
-                 current_profile->fine_ki,
-                 current_profile->fine_kd,
-                 current_profile->fine_min_flow_speed_rps,
-                 current_profile->fine_max_flow_speed_rps);
+                 profile_idx,
+                 (long)current_profile->rev,
+                 (long)current_profile->compatibility,
+                 escaped_name,
+                 f_p3, f_p4, f_p5, f_p6, f_p7,
+                 f_p8, f_p9, f_p10, f_p11, f_p12);
+
+        if (written < 0 || written >= (int)sizeof(buf)) {
+            // Should not happen with a 512-byte buffer; fail safe.
+            snprintf(buf, sizeof(buf), "%s{\"error\":\"ResponseTooLarge\"}", http_json_header);
+        }
     }
 
     size_t response_len = strlen(buf);
@@ -351,37 +441,63 @@ bool http_rest_profile_config(struct fs_file *file, int num_params, char *params
 bool http_rest_profile_summary(struct fs_file *file, int num_params, char *params[], char *values[])
 {
     // It does not take argument
-    assert(MAX_PROFILE_CNT <= 8);  // Ensures 256 byte buffer us sufficient
-    static char buf[256];
+    assert(MAX_PROFILE_CNT <= 8);
+    // Was 256; with escaped names and header this was tight. 512 is safer.
+    static char buf[512];
 
     // Response
-    // s0 (dict): A dictionary of all profiles in {idx: name} format. 
+    // s0 (dict): A dictionary of all profiles in {idx: name} format.
     // s1 (int): The current loaded profile index
     memset(buf, 0x0, sizeof(buf));
-    const char * item_template = "\"%d\":\"%s\",";
 
     // Create header
-    snprintf(buf, sizeof(buf), 
+    int written = snprintf(buf, sizeof(buf),
              "%s{\"s0\":{",
              http_json_header);
+    if (written < 0 || written >= (int)sizeof(buf)) {
+        snprintf(buf, sizeof(buf), "%s{\"error\":\"ResponseTooLarge\"}", http_json_header);
+        size_t response_len = strlen(buf);
+        file->data = buf;
+        file->len = response_len;
+        file->index = response_len;
+        file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+        return true;
+    }
 
-    size_t char_idx = strlen(buf);
+    size_t char_idx = (size_t)written;
 
-    // Write profile information
-    for (uint8_t p_idx=0; p_idx < MAX_PROFILE_CNT; p_idx+=1) {
-        snprintf(&buf[char_idx], sizeof(buf) - char_idx, 
-                 item_template,
-                 p_idx, profile_data.profiles[p_idx].name);
-        char_idx += strnlen((const char *) &buf[char_idx], sizeof(buf));
+    // Write profile information with escaped names
+    for (uint8_t p_idx = 0; p_idx < MAX_PROFILE_CNT; p_idx += 1) {
+        char escaped_name[PROFILE_NAME_MAX_LEN * 6 + 1];
+        json_escape_string(profile_data.profiles[p_idx].name, escaped_name, sizeof(escaped_name));
+
+        written = snprintf(&buf[char_idx], sizeof(buf) - char_idx,
+                 "\"%d\":\"%s\",",
+                 p_idx, escaped_name);
+        if (written < 0 || written >= (int)(sizeof(buf) - char_idx)) {
+            snprintf(buf, sizeof(buf), "%s{\"error\":\"ResponseTooLarge\"}", http_json_header);
+            size_t response_len = strlen(buf);
+            file->data = buf;
+            file->len = response_len;
+            file->index = response_len;
+            file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+            return true;
+        }
+        char_idx += (size_t)written;
     }
 
     // Append close bracket (replace the last comma)
-    buf[char_idx - 1] = '}';
+    if (char_idx > 0) {
+        buf[char_idx - 1] = '}';
+    }
 
     // Append s1
-    snprintf(&buf[char_idx], sizeof(buf) - char_idx,
-             ",\"s1\":%d}", 
+    written = snprintf(&buf[char_idx], sizeof(buf) - char_idx,
+             ",\"s1\":%d}",
              profile_data.current_profile_idx);
+    if (written < 0 || written >= (int)(sizeof(buf) - char_idx)) {
+        snprintf(buf, sizeof(buf), "%s{\"error\":\"ResponseTooLarge\"}", http_json_header);
+    }
 
     size_t response_len = strlen(buf);
     file->data = buf;

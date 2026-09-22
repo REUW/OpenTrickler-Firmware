@@ -8,7 +8,7 @@ $env:Path = "$env:USERPROFILE\.pico-sdk\ninja\v1.12.1;" + $env:Path
 $env:Path = "$env:USERPROFILE\.pico-sdk\cmake\v3.31.5\bin;" + $env:Path
 
 # Specify picotool path
-$env:Path = "$env:USERPROFILE\.pico-sdk\picotool\2.1.1\picotool;" + $env:Path
+$env:Path = "$env:USERPROFILE\.pico-sdk\picotool\2.3.0\picotool;" + $env:Path
 
 # Specify pioasm path
 $env:Path = "$env:USERPROFILE\.pico-sdk\tools\2.1.1\pioasm;" + $env:Path
