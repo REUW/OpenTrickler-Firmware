@@ -71,11 +71,36 @@ static void format_json_float(char *buffer, size_t buffer_len, float value, int 
     if (buffer == NULL || buffer_len == 0) {
         return;
     }
-    if (!isfinite(value)) {
+    if (!isfinite((double)value)) {
         snprintf(buffer, buffer_len, "null");
         return;
     }
-    snprintf(buffer, buffer_len, "%.*f", decimals, value);
+    snprintf(buffer, buffer_len, "%.*f", decimals, (double)value);
+}
+
+/* Escape profile name for a JSON string value (short fixed buffer). */
+static void escape_profile_name_json(const char *name, char *out, size_t out_len) {
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    if (name == NULL) {
+        out[0] = '\0';
+        return;
+    }
+    size_t o = 0;
+    for (size_t i = 0; name[i] != '\0' && (o + 1) < out_len; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (c == '"' || c == '\\') {
+            if ((o + 2) >= out_len) break;
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c < 0x20) {
+            continue;
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
 }
 
 static const char* ai_tuning_state_to_string(ai_tuning_state_t state) {
@@ -340,13 +365,18 @@ bool http_rest_ai_tuning_start(struct fs_file *file, int num_params,
         }
     }
 
+    char escaped_name[PROFILE_NAME_MAX_LEN * 2 + 1];
+    escape_profile_name_json(profile->name, escaped_name, sizeof(escaped_name));
+    char target_str[24];
+    format_json_float(target_str, sizeof(target_str), target_weight, 2);
+
     int len = snprintf(ai_tuning_json_buffer, sizeof(ai_tuning_json_buffer),
-        "%s{\"success\":true,\"message\":\"%s\",\"profile\":\"%s\",\"target_weight\":%.2f}",
+        "%s{\"success\":true,\"message\":\"%s\",\"profile\":\"%s\",\"target_weight\":%s}",
         http_json_header,
         entering_charge_mode ? "AI characterization started - entering charge mode"
                              : "AI characterization started",
-        profile->name,
-        target_weight);
+        escaped_name,
+        target_str);
     return finalize_json_response(file, len);
 }
 
@@ -408,13 +438,18 @@ bool http_rest_ai_machine_calibration_start(struct fs_file *file, int num_params
         }
     }
 
+    char escaped_name[PROFILE_NAME_MAX_LEN * 2 + 1];
+    escape_profile_name_json(profile->name, escaped_name, sizeof(escaped_name));
+    char target_str[24];
+    format_json_float(target_str, sizeof(target_str), target_weight, 2);
+
     int len = snprintf(ai_tuning_json_buffer, sizeof(ai_tuning_json_buffer),
-        "%s{\"success\":true,\"message\":\"%s\",\"profile\":\"%s\",\"target_weight\":%.2f}",
+        "%s{\"success\":true,\"message\":\"%s\",\"profile\":\"%s\",\"target_weight\":%s}",
         http_json_header,
         entering_charge_mode ? "OpenTrickler machine calibration started - entering charge mode"
                              : "OpenTrickler machine calibration started",
-        profile->name,
-        target_weight);
+        escaped_name,
+        target_str);
     return finalize_json_response(file, len);
 }
 
@@ -952,18 +987,13 @@ bool http_rest_ai_suggestions(struct fs_file *file, int num_params,
     memset(&runtime_stats, 0, sizeof(runtime_stats));
     bool have_runtime = ai_tuning_get_runtime_profile_stats((uint8_t)profile_idx, &runtime_stats) &&
                         runtime_stats.valid;
-    // Below this many logged PID throws, live numbers are still mostly
-    // sampling noise; keep trusting characterization until there is enough
-    // evidence to override it.
     bool runtime_trustworthy = have_runtime && runtime_stats.observation_count >= 4;
 
-    // --- measured plant gains, grains per second per rps ---
     float k_coarse = (model.coarse_best_speed_rps > 0.01f)
         ? model.coarse_best_flow_gps / model.coarse_best_speed_rps : 0.0f;
     float k_fine = (model.fine_best_speed_rps > 0.001f)
         ? model.fine_best_flow_gps / model.fine_best_speed_rps : 0.0f;
 
-    // --- time constants from the configured phase time targets ---
     ai_tuning_config_t* cfg = ai_tuning_get_config();
     float coarse_target_s = charge_mode_config.eeprom_charge_mode_data.coarse_time_target_ms / 1000.0f;
     float total_target_s = charge_mode_config.eeprom_charge_mode_data.total_time_target_ms / 1000.0f;
@@ -971,14 +1001,12 @@ bool http_rest_ai_suggestions(struct fs_file *file, int num_params,
     if (total_target_s < 2.0f) total_target_s = 20.0f;
     float fine_target_s = fmaxf(2.0f, total_target_s - coarse_target_s);
 
-    // Aim to cover the phase in roughly three time constants.
     float tau_coarse = fmaxf(0.5f, coarse_target_s / 3.0f);
     float tau_fine = fmaxf(0.5f, fine_target_s / 3.0f);
 
     float kp_coarse = (k_coarse > 0.001f) ? 1.0f / (tau_coarse * k_coarse) : 0.0f;
     float kp_fine = (k_fine > 0.0001f) ? 1.0f / (tau_fine * k_fine) : 0.0f;
 
-    // --- stop thresholds: prefer live-observed tail once there is enough of it ---
     float scale_period_s = (model.machine.valid && model.machine.scale_sample_period_ms > 1.0f)
         ? model.machine.scale_sample_period_ms / 1000.0f : 0.15f;
 
@@ -993,9 +1021,6 @@ bool http_rest_ai_suggestions(struct fs_file *file, int num_params,
     bool used_live_fine_tail = false;
     if (runtime_trustworthy) {
         if (runtime_stats.coarse_tail_count >= 4 && runtime_stats.coarse_tail_p95_gn > 0.0f) {
-            // The larger of the two: live evidence should only ever widen
-            // the safety margin relative to the lab measurement, never
-            // narrow it on the strength of a still-small sample.
             coarse_tail = fmaxf(coarse_tail_characterized, runtime_stats.coarse_tail_p95_gn);
             used_live_coarse_tail = (coarse_tail > coarse_tail_characterized + 0.001f);
         }
@@ -1007,8 +1032,6 @@ bool http_rest_ai_suggestions(struct fs_file *file, int num_params,
 
     float kernel = ai_tuning_effective_kernel_weight_gn(&model, NULL);
 
-    // Coarse must stop early enough that its own tail plus one scale period
-    // of continued flow does not carry past target.
     float coarse_stop = coarse_tail + model.coarse_trim_flow_gps * scale_period_s;
     if (!isfinite(coarse_stop) || coarse_stop <= 0.0f) {
         coarse_stop = fmaxf(0.30f, coarse_tail);
@@ -1021,25 +1044,6 @@ bool http_rest_ai_suggestions(struct fs_file *file, int num_params,
     float accept_tol = fmaxf(kernel > 0.0f ? kernel : 0.0f, 0.0154f);
     accept_tol = fmaxf(0.008f, fminf(0.20f, accept_tol));
 
-    // --- Kp cap: commanded speed at the stop threshold must not exceed the
-    // speed the tail was characterized at, or the real tail will be bigger
-    // than what the threshold above assumed. This is the direct fix for
-    // "suggested Kp overthrows" - it is not a tuning preference, it is
-    // keeping the gain consistent with the threshold it will run against.
-    //
-    // The PID loop floors its commanded speed at the profile's own
-    // min_flow_speed_rps (see charge_mode.cpp: fine_speed/coarse_speed is
-    // clamped up to that floor even when Kp*error would ask for less). So
-    // the speed actually running right at the stop threshold is not
-    // Kp*threshold - it is max(Kp*threshold, currently configured min
-    // flow speed). If someone applies only the suggested Kp/threshold and
-    // leaves an old, higher min-speed floor in place (the "Apply" button
-    // per row allows exactly that), the floor - not Kp - decides the real
-    // speed at cutoff, and it can be well above what the threshold assumed,
-    // which is what actually produces the overthrow. Folding the *current*
-    // min flow speed into the reference speed here means the suggested
-    // Kp/threshold pair stays safe even if the min-speed suggestion is
-    // never applied.
     profile_t *existing_profile = profile_get_by_idx((uint8_t)profile_idx);
     float coarse_existing_min_speed = existing_profile ? existing_profile->coarse_min_flow_speed_rps : 0.0f;
     float fine_existing_min_speed = existing_profile ? existing_profile->fine_min_flow_speed_rps : 0.0f;
@@ -1049,12 +1053,6 @@ bool http_rest_ai_suggestions(struct fs_file *file, int num_params,
     float fine_tail_ref_speed = model.fine_recovery_speed_rps > 0.001f
         ? model.fine_recovery_speed_rps : 0.08f;
 
-    // If the tube's currently configured floor speed is higher than the
-    // speed the tail was actually characterized at, the real in-flight tail
-    // at cutoff will be bigger too (more material already committed at a
-    // faster feed), so widen the stop threshold in proportion before
-    // capping Kp against it - rather than capping Kp against a reference
-    // speed the motor will never actually be allowed to slow below.
     if (coarse_existing_min_speed > coarse_tail_ref_speed) {
         coarse_stop *= (coarse_existing_min_speed / coarse_tail_ref_speed);
         coarse_stop = fmaxf(0.10f, fminf(5.0f, coarse_stop));
@@ -1071,13 +1069,8 @@ bool http_rest_ai_suggestions(struct fs_file *file, int num_params,
     kp_coarse = fminf(kp_coarse, kp_coarse_cap);
     kp_fine = fminf(kp_fine, kp_fine_cap);
 
-    // --- live over-rate: real overthrows shrink Kp further and are the
-    // reason the suggestion actually comes down with more logged charges,
-    // rather than being stuck at whatever characterization said once.
     bool over_rate_applied = false;
     if (runtime_trustworthy && runtime_stats.over_rate > 0.15f) {
-        // 15% over-rate -> ~15% shrink, capped at 40% shrink so one bad
-        // batch cannot collapse the gain to near zero.
         float shrink = fmaxf(0.60f, 1.0f - runtime_stats.over_rate);
         kp_coarse *= shrink;
         kp_fine *= shrink;
@@ -1089,34 +1082,63 @@ bool http_rest_ai_suggestions(struct fs_file *file, int num_params,
     float fine_min = model.fine_recovery_speed_rps > 0.001f ? model.fine_recovery_speed_rps : 0.08f;
     float fine_max = model.fine_best_speed_rps > 0.001f ? model.fine_best_speed_rps : 2.0f;
 
+    /* Sanitize all floats so the client never sees bare "nan"/"inf". */
+    char s_k_coarse[24], s_k_fine[24], s_coarse_tail[24], s_fine_tail[24];
+    char s_scale_ms[24], s_kernel[24], s_tau_c[24], s_tau_f[24];
+    char s_kp_c_cap[24], s_kp_f_cap[24], s_live_over[24];
+    char s_kp_c[24], s_kp_f[24], s_cmin[24], s_cmax[24], s_fmin[24], s_fmax[24];
+    char s_cstop[24], s_fstop[24], s_atol[24];
+
+    format_json_float(s_k_coarse, sizeof(s_k_coarse), k_coarse, 4);
+    format_json_float(s_k_fine, sizeof(s_k_fine), k_fine, 5);
+    format_json_float(s_coarse_tail, sizeof(s_coarse_tail), coarse_tail, 4);
+    format_json_float(s_fine_tail, sizeof(s_fine_tail), fine_tail, 4);
+    format_json_float(s_scale_ms, sizeof(s_scale_ms), scale_period_s * 1000.0f, 1);
+    format_json_float(s_kernel, sizeof(s_kernel), kernel, 4);
+    format_json_float(s_tau_c, sizeof(s_tau_c), tau_coarse, 2);
+    format_json_float(s_tau_f, sizeof(s_tau_f), tau_fine, 2);
+    format_json_float(s_kp_c_cap, sizeof(s_kp_c_cap), kp_coarse_cap, 4);
+    format_json_float(s_kp_f_cap, sizeof(s_kp_f_cap), kp_fine_cap, 4);
+    format_json_float(s_live_over, sizeof(s_live_over),
+                      have_runtime ? runtime_stats.over_rate : 0.0f, 3);
+    format_json_float(s_kp_c, sizeof(s_kp_c), kp_coarse, 4);
+    format_json_float(s_kp_f, sizeof(s_kp_f), kp_fine, 4);
+    format_json_float(s_cmin, sizeof(s_cmin), coarse_min, 3);
+    format_json_float(s_cmax, sizeof(s_cmax), coarse_max, 3);
+    format_json_float(s_fmin, sizeof(s_fmin), fine_min, 3);
+    format_json_float(s_fmax, sizeof(s_fmax), fine_max, 3);
+    format_json_float(s_cstop, sizeof(s_cstop), coarse_stop, 4);
+    format_json_float(s_fstop, sizeof(s_fstop), fine_stop, 4);
+    format_json_float(s_atol, sizeof(s_atol), accept_tol, 4);
+
     int len = snprintf(ai_tuning_json_buffer, sizeof(ai_tuning_json_buffer),
         "%s{\"success\":true,\"available\":true,\"profile_idx\":%d,"
         "\"measured\":{"
-          "\"k_coarse_gps_per_rps\":%.4f,\"k_fine_gps_per_rps\":%.5f,"
-          "\"coarse_tail_gn\":%.4f,\"fine_tail_gn\":%.4f,"
-          "\"scale_period_ms\":%.1f,\"kernel_weight_gn\":%.4f,"
-          "\"tau_coarse_s\":%.2f,\"tau_fine_s\":%.2f,"
-          "\"kp_coarse_cap\":%.4f,\"kp_fine_cap\":%.4f,"
+          "\"k_coarse_gps_per_rps\":%s,\"k_fine_gps_per_rps\":%s,"
+          "\"coarse_tail_gn\":%s,\"fine_tail_gn\":%s,"
+          "\"scale_period_ms\":%s,\"kernel_weight_gn\":%s,"
+          "\"tau_coarse_s\":%s,\"tau_fine_s\":%s,"
+          "\"kp_coarse_cap\":%s,\"kp_fine_cap\":%s,"
           "\"used_live_coarse_tail\":%s,\"used_live_fine_tail\":%s,"
-          "\"over_rate_applied\":%s,\"live_observation_count\":%u,\"live_over_rate\":%.3f},"
+          "\"over_rate_applied\":%s,\"live_observation_count\":%u,\"live_over_rate\":%s},"
         "\"suggested\":{"
-          "\"p3\":%.4f,\"p4\":0,\"p5\":0,"
-          "\"p6\":%.3f,\"p7\":%.3f,"
-          "\"p8\":%.4f,\"p9\":0,\"p10\":0,"
-          "\"p11\":%.3f,\"p12\":%.3f,"
-          "\"c5\":%.4f,\"c6\":%.4f,\"c26\":%.4f}}",
+          "\"p3\":%s,\"p4\":0,\"p5\":0,"
+          "\"p6\":%s,\"p7\":%s,"
+          "\"p8\":%s,\"p9\":0,\"p10\":0,"
+          "\"p11\":%s,\"p12\":%s,"
+          "\"c5\":%s,\"c6\":%s,\"c26\":%s}}",
         http_json_header, profile_idx,
-        k_coarse, k_fine, coarse_tail, fine_tail,
-        scale_period_s * 1000.0f, kernel, tau_coarse, tau_fine,
-        kp_coarse_cap, kp_fine_cap,
+        s_k_coarse, s_k_fine, s_coarse_tail, s_fine_tail,
+        s_scale_ms, s_kernel, s_tau_c, s_tau_f,
+        s_kp_c_cap, s_kp_f_cap,
         used_live_coarse_tail ? "true" : "false",
         used_live_fine_tail ? "true" : "false",
         over_rate_applied ? "true" : "false",
         (unsigned)(have_runtime ? runtime_stats.observation_count : 0),
-        have_runtime ? runtime_stats.over_rate : 0.0f,
-        kp_coarse, coarse_min, coarse_max,
-        kp_fine, fine_min, fine_max,
-        coarse_stop, fine_stop, accept_tol);
+        s_live_over,
+        s_kp_c, s_cmin, s_cmax,
+        s_kp_f, s_fmin, s_fmax,
+        s_cstop, s_fstop, s_atol);
     return finalize_json_response(file, len);
 }
 
